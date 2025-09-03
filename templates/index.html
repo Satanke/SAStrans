@@ -1,0 +1,605 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SAS数据集翻译平台</title>
+    <link href="https://cdn.bootcdn.net/ajax/libs/bootstrap/5.3.0/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <link href="{{ url_for('static', filename='style.css') }}" rel="stylesheet">
+</head>
+<body>
+    <div class="container-fluid">
+        <header class="bg-primary text-white py-3 mb-4">
+            <div class="container">
+                <h1 class="h2 mb-0">
+                    <i class="fas fa-database me-2"></i>
+                    SAS数据集翻译平台
+                </h1>
+            </div>
+        </header>
+
+        <div class="container">
+            <!-- 主页面布局 -->
+            <div class="main-layout">
+                <div class="row g-0">
+                    <!-- 左侧导航栏 -->
+                    <div class="col-md-2">
+                        <div class="main-navigation-vertical">
+                            <!-- 步骤指示器 -->
+                            <div class="step-indicator-vertical mb-4" id="stepIndicator">
+                                <div class="step-vertical active" id="step1">
+                                    <div class="step-number-vertical">1</div>
+                                    <div class="step-text-vertical">基础设置</div>
+                                </div>
+                                <div class="step-vertical" id="step2">
+                                    <div class="step-number-vertical">2</div>
+                                    <div class="step-text-vertical">数据预览</div>
+                                </div>
+                                <div class="step-vertical" id="step3">
+                                    <div class="step-number-vertical">3</div>
+                                    <div class="step-text-vertical">合并配置</div>
+                                </div>
+                                <div class="step-vertical" id="step4">
+                                    <div class="step-number-vertical">4</div>
+                                    <div class="step-text-vertical">翻译库版本控制</div>
+                                </div>
+                                <div class="step-vertical" id="step5">
+                                    <div class="step-number-vertical">5</div>
+                                    <div class="step-text-vertical">翻译与确认</div>
+                                </div>
+                            </div>
+
+                            <!-- 垂直标签页导航 -->
+                            <ul class="nav nav-pills flex-column main-tabs-vertical" id="mainTabs" role="tablist">
+                                <li class="nav-item" role="presentation">
+                                    <button class="nav-link active" id="setup-tab" data-bs-toggle="pill" 
+                                            data-bs-target="#setup-content" type="button" role="tab">
+                                        <i class="fas fa-cog me-2"></i>
+                                        <span class="nav-text">基础设置</span>
+                                    </button>
+                                </li>
+                                <li class="nav-item" role="presentation">
+                                    <button class="nav-link" id="preview-tab" data-bs-toggle="pill" 
+                                            data-bs-target="#preview-content" type="button" role="tab">
+                                        <i class="fas fa-table me-2"></i>
+                                        <span class="nav-text">数据预览</span>
+                                    </button>
+                                </li>
+                                <li class="nav-item" role="presentation">
+                                    <button class="nav-link" id="merge-config-tab" data-bs-toggle="pill" 
+                                            data-bs-target="#merge-config-content" type="button" role="tab">
+                                        <i class="fas fa-plus-circle me-2"></i>
+                                        <span class="nav-text">合并配置</span>
+                                    </button>
+                                </li>
+                                <li class="nav-item" role="presentation">
+                                    <button class="nav-link" id="translation-library-tab" data-bs-toggle="pill" 
+                                            data-bs-target="#translation-library-content" type="button" role="tab">
+                                        <i class="fas fa-database me-2"></i>
+                                        <span class="nav-text">翻译库版本控制</span>
+                                    </button>
+                                </li>
+                                <li class="nav-item" role="presentation">
+                                    <button class="nav-link" id="translation-confirmation-tab" data-bs-toggle="pill" 
+                                            data-bs-target="#translation-confirmation-content" type="button" role="tab">
+                                        <i class="fas fa-language me-2"></i>
+                                        <span class="nav-text">翻译与确认</span>
+                                    </button>
+                                </li>
+                            </ul>
+                        </div>
+                    </div>
+
+                    <!-- 右侧内容区域 -->
+                    <div class="col-md-10">
+                        <div class="tab-content main-tab-content" id="mainTabContent">
+                
+                <!-- 第一个标签页：基础设置 -->
+                <div class="tab-pane fade show active" id="setup-content" role="tabpanel">
+                    <div class="setup-section">
+                        <div class="row g-4">
+                            <div class="col-md-6">
+                                <div class="card h-100">
+                                    <div class="card-header">
+                                        <h5 class="card-title mb-0">
+                                            <i class="fas fa-cog me-2"></i>翻译模式选择
+                                        </h5>
+                                    </div>
+                                    <div class="card-body">
+                                        <div class="mb-3">
+                                            <label for="translationMode" class="form-label">选择翻译模式</label>
+                                            <select class="form-select" id="translationMode">
+                                                <option value="RAW">RAW</option>
+                                                <option value="SDTM">SDTM</option>
+                                            </select>
+                                            <div class="form-text">RAW模式直接翻译，SDTM模式支持变量合并</div>
+                                        </div>
+                                        <div class="mb-3" id="translationDirectionSection">
+                                            <label for="translationDirection" class="form-label">翻译方向</label>
+                                            <select class="form-select" id="translationDirection">
+                                                <option value="zh_to_en">中译英</option>
+                                                <option value="en_to_zh">英译中</option>
+                                            </select>
+                                            <div class="form-text" id="translationDirectionHint">英译中时，合并变量的值会用空格间隔；中译英时无间隔</div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="col-md-6">
+                                <div class="card h-100">
+                                    <div class="card-header">
+                                        <h5 class="card-title mb-0">
+                                            <i class="fas fa-folder-open me-2"></i>数据集路径
+                                        </h5>
+                                    </div>
+                                    <div class="card-body">
+                                        <div class="mb-3">
+                                            <label for="datasetPath" class="form-label">SAS数据集路径</label>
+                                            <div class="input-group">
+                                                <input type="text" class="form-control" id="datasetPath" 
+                                                       placeholder="请输入SAS数据集文件夹路径">
+                                                <button class="btn btn-primary" type="button" id="readButton">
+                                                    <i class="fas fa-search me-2"></i>读取
+                                                </button>
+                                            </div>
+                                            <div class="form-text">请选择包含.sas7bdat文件的文件夹路径</div>
+                                        </div>
+                                        
+                                        <!-- 进度指示器 -->
+                                        <div class="progress-container d-none" id="setupProgress">
+                                            <div class="progress mb-2">
+                                                <div class="progress-bar progress-bar-striped progress-bar-animated" 
+                                                     role="progressbar" style="width: 100%"></div>
+                                            </div>
+                                            <small class="text-muted">正在读取数据集...</small>
+                                        </div>
+                                        
+                                        <!-- 下一步按钮 -->
+                                        <div class="d-grid mt-3" id="nextToPreviewContainer" style="display: none !important;">
+                                            <button class="btn btn-success" id="nextToPreviewBtn">
+                                                <i class="fas fa-arrow-right me-2"></i>查看数据预览
+                                            </button>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 第二个标签页：数据预览 -->
+                <div class="tab-pane fade" id="preview-content" role="tabpanel">
+                    <div class="preview-section">
+                        <div class="card">
+                            <div class="card-header d-flex justify-content-between align-items-center">
+                                <h5 class="card-title mb-0">
+                                    <i class="fas fa-table me-2"></i>合并前数据预览
+                                </h5>
+                                <div id="datasetStats" class="text-muted"></div>
+                            </div>
+                            <div class="card-body p-0">
+                                <div class="row g-0" style="min-height: 500px;">
+                                    <!-- 左侧数据集列表 -->
+                                    <div class="col-md-3 border-end">
+                                        <div class="dataset-list-container">
+                                            <div class="dataset-list-header p-3 bg-light border-bottom">
+                                                <h6 class="mb-0">
+                                                    <i class="fas fa-database me-2"></i>数据集列表
+                                                </h6>
+                                            </div>
+                                            <div class="dataset-list" id="datasetList">
+                                                <!-- 数据集列表项将在这里动态生成 -->
+                                            </div>
+                                        </div>
+                                    </div>
+                                    
+                                    <!-- 右侧数据预览区域 -->
+                                    <div class="col-md-9">
+                                        <div class="data-preview-container">
+                                            <div class="preview-header p-3 bg-light border-bottom">
+                                                <div class="d-flex justify-content-between align-items-center">
+                                                    <h6 class="mb-0" id="currentDatasetTitle">
+                                                        <i class="fas fa-eye me-2"></i>请选择数据集查看预览
+                                                    </h6>
+                                                                                                    <div class="preview-controls">
+                                                    <span class="progress-info me-3" id="loadedRowsIndicator" style="display: none;">
+                                                        <i class="fas fa-eye me-1"></i><span id="loadedRowsText">0 行</span>
+                                                    </span>
+                                                    <span class="progress-percent me-3" id="loadingProgress" style="display: none;">0%</span>
+                                                    <button class="btn btn-sm btn-outline-primary" id="refreshPreviewBtn" style="display: none;">
+                                                        <i class="fas fa-sync-alt me-1"></i>刷新
+                                                    </button>
+                                                    <button class="btn btn-sm btn-outline-success" id="showAllDataBtn" style="display: none;">
+                                                        <i class="fas fa-expand me-1"></i>显示全部
+                                                    </button>
+                                                </div>
+                                                </div>
+                                            </div>
+                                            <div class="preview-content p-3" id="previewContent">
+                                                <div class="text-center text-muted py-5">
+                                                    <i class="fas fa-table fa-3x mb-3"></i>
+                                                    <h5>选择左侧数据集开始预览</h5>
+                                                    <p>点击左侧数据集名称来查看其内容</p>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                                
+                                <!-- 操作按钮 -->
+                                <div class="card-footer">
+                                    <div class="d-flex justify-content-between" id="previewActions">
+                                        <button class="btn btn-outline-secondary" id="backToSetupBtn">
+                                            <i class="fas fa-arrow-left me-2"></i>返回设置
+                                        </button>
+                                        <div class="preview-summary text-muted" id="previewSummary"></div>
+                                        <button class="btn btn-primary" id="nextToMergeBtn">
+                                            <i class="fas fa-arrow-right me-2"></i>配置合并
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 第三个标签页：合并配置 -->
+                <div class="tab-pane fade" id="merge-config-content" role="tabpanel">
+                    <div class="merge-config-section">
+                        <div class="card">
+                            <div class="card-header">
+                                <h5 class="card-title mb-0">
+                                    <i class="fas fa-plus-circle me-2"></i>变量合并配置
+                                </h5>
+                            </div>
+                            <div class="card-body">
+                                <!-- 配置说明 -->
+                                <div class="alert alert-info">
+                                    <i class="fas fa-info-circle me-2"></i>
+                                    <strong>配置说明：</strong>选择目标变量和源变量，系统将按配置顺序合并变量内容。完成一个配置后可以继续添加下一个配置。
+                                </div>
+                                
+                                <!-- 当前配置 -->
+                                <div id="currentConfigSection" class="d-none">
+                                    <h6 class="mb-3">
+                                        <i class="fas fa-edit me-2"></i>当前配置
+                                        <span class="badge bg-primary ms-2" id="currentConfigIndex">1</span>
+                                    </h6>
+                                    <div class="row g-3 mb-4 p-3 border rounded bg-light">
+                                        <div class="col-md-6">
+                                            <label for="configDatasetSelect" class="form-label">选择数据集</label>
+                                            <select class="form-select" id="configDatasetSelect">
+                                                <option value="">请选择数据集</option>
+                                            </select>
+                                        </div>
+                                        <div class="col-md-6">
+                                            <label for="configVariableSelect" class="form-label">选择变量</label>
+                                            <select class="form-select" id="configVariableSelect">
+                                                <option value="">请选择变量</option>
+                                            </select>
+                                        </div>
+                                        <div class="col-12">
+                                            <label class="form-label">已选择的变量</label>
+                                            <div id="selectedVariablesDisplay" class="selected-variables-container p-2 border rounded">
+                                                <small class="text-muted">请先选择目标变量，然后选择源变量</small>
+                                            </div>
+                                        </div>
+                                        <div class="col-12">
+                                            <div class="btn-group w-100">
+                                                <button class="btn btn-outline-primary" id="addVariableBtn" disabled>
+                                                    <i class="fas fa-plus me-2"></i>添加变量
+                                                </button>
+                                                <button class="btn btn-success" id="completeConfigBtn" disabled>
+                                                    <i class="fas fa-check me-2"></i>完成当前配置
+                                                </button>
+                                                <button class="btn btn-outline-danger" id="cancelConfigBtn">
+                                                    <i class="fas fa-times me-2"></i>取消
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                                
+                                <!-- 已完成的配置列表 -->
+                                <div id="completedConfigsSection">
+                                    <div class="d-flex justify-content-between align-items-center mb-3">
+                                        <h6 class="mb-0">
+                                            <i class="fas fa-list me-2"></i>已配置的合并规则
+                                        </h6>
+
+                                    </div>
+                                    <div class="table-responsive">
+                                        <table class="table table-bordered">
+                                            <thead class="table-light">
+                                                <tr>
+                                                    <th>序号</th>
+                                                    <th>主变量</th>
+                                                    <th>源变量</th>
+                                                    <th>数据集</th>
+                                                    <th>操作</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody id="mergeConfigBody">
+                                                <tr class="text-center" id="emptyConfigRow">
+                                                    <td colspan="5" class="py-3">
+                                                        <button class="btn btn-outline-primary btn-lg" id="addFirstConfigBtn">
+                                                            <i class="fas fa-plus me-2"></i>添加合并配置
+                                                        </button>
+                                                    </td>
+                                                </tr>
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                                
+                                <!-- 操作按钮 -->
+                                <div class="d-flex justify-content-between mt-4">
+                                    <button class="btn btn-outline-secondary" id="backToPreviewBtn">
+                                        <i class="fas fa-arrow-left me-2"></i>返回预览
+                                    </button>
+                                    <div>
+                                        <button class="btn btn-primary me-2" id="executeMergeBtn" disabled>
+                                            <i class="fas fa-play me-2"></i>执行合并
+                                        </button>
+
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+
+
+                <!-- 第四个标签页：翻译库版本控制 -->
+                <div class="tab-pane fade" id="translation-library-content" role="tabpanel">
+                    <div class="translation-library-section">
+                        <div class="card">
+                            <div class="card-header">
+                                <h5 class="card-title mb-0">
+                                    <i class="fas fa-database me-2"></i>翻译库版本控制
+                                </h5>
+                            </div>
+                            <div class="card-body">
+                                <div class="row">
+                                    <div class="col-md-6">
+                                        <div class="mb-3">
+                                            <label for="translationDirection" class="form-label">翻译方向</label>
+                                            <select class="form-select" id="translationDirection">
+                                                <option value="">请选择翻译方向</option>
+                                                <option value="en_to_zh">英文 → 中文</option>
+                                                <option value="zh_to_en">中文 → 英文</option>
+                                            </select>
+                                        </div>
+                                    </div>
+                                    <div class="col-md-6">
+                                        <div class="mb-3">
+                                            <label for="translationMode" class="form-label">翻译模式</label>
+                                            <select class="form-select" id="translationMode">
+                                                <option value="">请选择翻译模式</option>
+                                                <option value="meddra">MedDRA翻译</option>
+                                                <option value="whodrug">WHODrug翻译</option>
+                                                <option value="both">MedDRA + WHODrug</option>
+                                            </select>
+                                        </div>
+                                    </div>
+                                </div>
+                                
+                                <div class="row">
+                                    <div class="col-md-4">
+                                        <div class="mb-3">
+                                            <label for="medDRAVersion" class="form-label">MedDRA版本</label>
+                                            <select class="form-select" id="medDRAVersion">
+                                                <option value="">请选择版本</option>
+                                            </select>
+                                        </div>
+                                    </div>
+                                    <div class="col-md-4">
+                                        <div class="mb-3">
+                                            <label for="whoDrugVersion" class="form-label">WHODrug版本</label>
+                                            <select class="form-select" id="whoDrugVersion">
+                                                <option value="">请选择版本</option>
+                                            </select>
+                                        </div>
+                                    </div>
+                                    <div class="col-md-4">
+                                        <div class="mb-3">
+                                            <label for="igVersion" class="form-label">IG版本</label>
+                                            <select class="form-select" id="igVersion">
+                                                <option value="">请选择版本</option>
+                                                <option value="3.4">IG 3.4</option>
+                                                <option value="3.3">IG 3.3</option>
+                                                <option value="3.2">IG 3.2</option>
+                                            </select>
+                                        </div>
+                                    </div>
+                                </div>
+                                
+                                <!-- MedDRA配置表 -->
+                                <div class="mt-4">
+                                    <h6 class="mb-3">
+                                        <i class="fas fa-table me-2"></i>MedDRA配置表
+                                    </h6>
+                                    <div class="alert alert-info">
+                                        <i class="fas fa-info-circle me-2"></i>
+                                        <strong>配置说明：</strong>请选择MedDRA数据表中的name列和code列对应的变量名。name列必选，code列可选。
+                                    </div>
+                                    <div class="table-responsive">
+                                        <table class="table table-bordered">
+                                            <thead class="table-light">
+                                                <tr>
+                                                    <th>序号</th>
+                                                    <th>数据表路径</th>
+                                                    <th>Name列变量</th>
+                                                    <th>Code列变量</th>
+                                                    <th>操作</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody id="medDRAConfigBody">
+                                                <tr class="text-center" id="emptyMedDRAConfigRow">
+                                                    <td colspan="5" class="py-3">
+                                                        <button class="btn btn-outline-primary" id="addMedDRAConfigBtn">
+                                                            <i class="fas fa-plus me-2"></i>添加MedDRA配置
+                                                        </button>
+                                                    </td>
+                                                </tr>
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                                
+                                <!-- WHODrug配置表 -->
+                                <div class="mt-4">
+                                    <h6 class="mb-3">
+                                        <i class="fas fa-table me-2"></i>WHODrug配置表
+                                    </h6>
+                                    <div class="alert alert-info">
+                                        <i class="fas fa-info-circle me-2"></i>
+                                        <strong>配置说明：</strong>请选择WHODrug数据表中的name列和code列对应的变量名。name列必选，code列可选。
+                                    </div>
+                                    <div class="table-responsive">
+                                        <table class="table table-bordered">
+                                            <thead class="table-light">
+                                                <tr>
+                                                    <th>序号</th>
+                                                    <th>数据表路径</th>
+                                                    <th>Name列变量</th>
+                                                    <th>Code列变量</th>
+                                                    <th>操作</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody id="whoDrugConfigBody">
+                                                <tr class="text-center" id="emptyWhoDrugConfigRow">
+                                                    <td colspan="5" class="py-3">
+                                                        <button class="btn btn-outline-primary" id="addWhoDrugConfigBtn">
+                                                            <i class="fas fa-plus me-2"></i>添加WHODrug配置
+                                                        </button>
+                                                    </td>
+                                                </tr>
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                                
+                                <div class="d-flex justify-content-end mt-4">
+                                    <button class="btn btn-primary" id="saveTranslationConfigBtn">
+                                        <i class="fas fa-save me-2"></i>保存配置
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 第五个标签页：翻译与确认 -->
+                <div class="tab-pane fade" id="translation-confirmation-content" role="tabpanel">
+                    <div class="translation-confirmation-section">
+                        <div class="card">
+                            <div class="card-header">
+                                <h5 class="card-title mb-0">
+                                    <i class="fas fa-language me-2"></i>翻译与确认
+                                </h5>
+                            </div>
+                            <div class="card-body">
+                                <div class="row mb-3">
+                                    <div class="col-md-12">
+                                        <div class="btn-group w-100" role="group">
+                                            <button type="button" class="btn btn-outline-primary" id="codedListBtn">
+                                                <i class="fas fa-list me-2"></i>编码清单
+                                            </button>
+                                            <button type="button" class="btn btn-outline-primary" id="uncodedListBtn">
+                                                <i class="fas fa-list-ul me-2"></i>非编码清单
+                                            </button>
+                                            <button type="button" class="btn btn-outline-primary" id="datasetLabelBtn">
+                                                <i class="fas fa-tag me-2"></i>数据集Label
+                                            </button>
+                                            <button type="button" class="btn btn-outline-primary" id="variableLabelBtn">
+                                                <i class="fas fa-tags me-2"></i>变量Label
+                                            </button>
+                                        </div>
+                                    </div>
+                                </div>
+                                
+                                <div id="translationContentArea">
+                                    <div class="text-center text-muted py-5">
+                                        <i class="fas fa-mouse-pointer fa-3x mb-3"></i>
+                                        <p>请选择上方的功能按钮开始翻译</p>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 加载状态覆盖层 -->
+            <div id="loadingOverlay" class="loading-overlay d-none">
+                <div class="text-center text-white">
+                    <div class="spinner-border spinner-border-lg text-light mb-3" role="status">
+                        <span class="visually-hidden">加载中...</span>
+                    </div>
+                    <h5 id="loadingText">正在处理...</h5>
+                    <p id="loadingSubtext" class="mb-0">请稍候</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+
+
+    <!-- 数据预处理确认对话框 -->
+    <div class="modal fade" id="preprocessingConfirmModal" tabindex="-1">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">确认数据预处理</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <p>是否已完成数据预处理？</p>
+                    <div class="alert alert-info">
+                        <i class="fas fa-info-circle me-2"></i>
+                        确认后将进入翻译版本控制页面，请确保所有数据合并配置已正确设置。
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                    <button type="button" class="btn btn-primary" id="confirmPreprocessing">确认完成</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 映射文件保存对话框 -->
+    <div class="modal fade" id="mappingSaveModal" tabindex="-1">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">保存映射配置</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <p>是否保存当前的映射文件？</p>
+                    <div class="alert alert-success">
+                        <i class="fas fa-save me-2"></i>
+                        保存后，下次使用相同路径时可以自动读取配置，无需重新设置。
+                    </div>
+                    <div class="mb-3">
+                        <label for="mappingConfigName" class="form-label">配置名称（可选）</label>
+                        <input type="text" class="form-control" id="mappingConfigName" placeholder="为该配置命名，便于识别">
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" id="skipSaveMapping">不保存</button>
+                    <button type="button" class="btn btn-primary" id="confirmSaveMapping">保存配置</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.bootcdn.net/ajax/libs/bootstrap/5.3.0/js/bootstrap.bundle.min.js"></script>
+    <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
