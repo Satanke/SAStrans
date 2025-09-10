@@ -1784,6 +1784,44 @@ def get_dataset_variables_by_name():
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
 
+def should_translate_value(value, translation_direction):
+    """判断值是否需要翻译"""
+    if not value or pd.isna(value):
+        return False
+    
+    value_str = str(value).strip()
+    if not value_str:
+        return False
+    
+    import re
+    
+    # 中译英：如果只包含英文字符、数字、空格和常见符号，则不需要翻译
+    if translation_direction == 'zh_to_en':
+        # 只包含ASCII字符（英文、数字、标点符号）
+        if re.match(r'^[\x00-\x7F]+$', value_str):
+            return False
+    
+    # 英译中：如果只包含中文字符、数字、空格和常见符号，则不需要翻译
+    elif translation_direction == 'en_to_zh':
+        # 只包含中文字符、数字、标点符号和空格
+        if re.match(r'^[\u4e00-\u9fff\d\s，。！？；：""（）\[\]]+$', value_str):
+            return False
+    
+    return True
+
+def is_ai_translation_eligible(value):
+    """判断值是否符合AI翻译条件"""
+    if not value or pd.isna(value):
+        return False
+    
+    value_str = str(value).strip()
+    # 条件：长度在3-50字符之间，包含字母，不全是数字或特殊字符
+    if (3 <= len(value_str) <= 50 and 
+        any(c.isalpha() for c in value_str) and 
+        not value_str.replace(' ', '').replace('-', '').replace('.', '').replace('/', '').isdigit()):
+        return True
+    return False
+
 @app.route('/api/generate_coded_list', methods=['POST'])
 def generate_coded_list():
     """生成编码清单"""
@@ -1809,48 +1847,138 @@ def generate_coded_list():
         meddra_version = config.get('meddra_version')
         whodrug_version = config.get('whodrug_version')
         
-        # 获取合并后的数据
-        processor = SASDataProcessor()
-        processor.read_sas_files(path)
+        # 处理版本格式，从"27.1.english"格式提取"27.1"
+        if meddra_version and '.' in meddra_version:
+            # 提取版本号部分，去掉语言后缀
+            version_parts = meddra_version.split('.')
+            if len(version_parts) >= 2:
+                meddra_version = f"{version_parts[0]}.{version_parts[1]}"
+        
+        if whodrug_version:
+            # WHODrug版本格式处理：从"global.2025.mar.1.english"提取"2025 Mar 1"
+            if 'global.' in whodrug_version:
+                parts = whodrug_version.replace('global.', '').split('.')
+                if len(parts) >= 3:
+                    year = parts[0]
+                    month = parts[1].capitalize()
+                    day = parts[2]
+                    whodrug_version = f"{year} {month} {day}"
+        
+        print(f'处理后的版本信息 - MedDRA: {meddra_version}, WHODrug: {whodrug_version}')
+        
+        # 使用全局processor实例获取合并后的数据
+        # 检查是否已经加载了相同路径的数据
+        if not processor.datasets or getattr(processor, 'current_path', None) != path:
+            print(f'开始读取SAS文件: {path}')
+            success, message = processor.read_sas_files(path)
+            if not success:
+                return jsonify({'success': False, 'message': f'读取SAS文件失败: {message}'}), 500
+            processor.current_path = path  # 记录当前路径
+            print(f'SAS文件读取完成，共加载 {len(processor.datasets)} 个数据集')
         
         coded_items = []
+        # 统一收集所有未匹配的项目，用于批量AI翻译
+        unmatched_items = {
+            'meddra': [],  # MedDRA未匹配项目
+            'whodrug': []  # WHODrug未匹配项目
+        }
+        
+        print(f'开始处理编码清单，MedDRA配置项: {len(meddra_config)}, WHODrug配置项: {len(whodrug_config)}')
         
         # 处理MedDRA配置的变量
-        for meddra_item in meddra_config:
-            if meddra_item.get('name'):
-                variable_name = meddra_item['name']
-                code_variable = meddra_item.get('code')
+        for idx, meddra_item in enumerate(meddra_config):
+            print(f'处理MedDRA配置项 {idx+1}/{len(meddra_config)}: {meddra_item.get("name_column")}')
+            if meddra_item.get('name_column'):
+                variable_name = meddra_item['name_column']
+                code_variable = meddra_item.get('code_column')
                 
                 # 从合并数据中获取该变量的所有值
                 for dataset_name, dataset_info in processor.datasets.items():
                     df = dataset_info['data']
                     if variable_name in df.columns:
                         unique_values = df[variable_name].dropna().unique()
+                        # 限制处理的唯一值数量以提高性能
+                        if len(unique_values) > 100:
+                            print(f'  数据集 {dataset_name} 中变量 {variable_name} 有 {len(unique_values)} 个唯一值，限制为前100个')
+                            unique_values = unique_values[:100]
+                        # 限制处理的唯一值数量以提高性能
+                        if len(unique_values) > 100:
+                            print(f'  数据集 {dataset_name} 中变量 {variable_name} 有 {len(unique_values)} 个唯一值，限制为前100个')
+                            unique_values = unique_values[:100]
                         
-                        for value in unique_values:
-                            translated_value = ''
-                            translation_source = 'AI'  # 默认AI翻译
-                            needs_confirmation = 'N'
-                            
-                            # 根据配置进行翻译匹配
+                        print(f'    处理 {len(unique_values)} 个唯一值...')
+                        
+                        # 批量查询翻译数据以提高性能
+                        translation_dict = {}
+                        conn = sqlite3.connect('translation_db.sqlite')
+                        try:
+                            cursor = conn.cursor()
                             if code_variable and code_variable in df.columns:
-                                # 有code列的情况，使用meddra_merged进行匹配
-                                translation_source = f'meddra_merged_{meddra_version}'
-                                # TODO: 实现从meddra_merged表的匹配逻辑
+                                # 有code列的情况，批量查询code对应的翻译
+                                code_values = []
+                                value_to_code = {}
+                                for value in unique_values:
+                                    code_value = df[df[variable_name] == value][code_variable].iloc[0] if len(df[df[variable_name] == value]) > 0 else None
+                                    if code_value:
+                                        code_values.append(str(code_value))
+                                        value_to_code[str(value)] = str(code_value)
+                                
+                                if code_values:
+                                    placeholders = ','.join(['?'] * len(code_values))
+                                    meddra_query = f"SELECT code, name_cn, name_en FROM meddra_merged WHERE code IN ({placeholders}) AND version = ?"
+                                    cursor.execute(meddra_query, code_values + [meddra_version])
+                                    for row in cursor.fetchall():
+                                        code, name_cn, name_en = row
+                                        # 找到对应的value
+                                        for value, value_code in value_to_code.items():
+                                            if value_code == code:
+                                                if translation_direction == 'zh_to_en':
+                                                    translation_dict[value] = name_en
+                                                else:
+                                                    translation_dict[value] = name_cn
                             else:
-                                # 只有name列的情况，直接匹配name值
-                                translation_source = f'meddra_merged_{meddra_version}'
-                                # TODO: 实现从meddra_merged表的匹配逻辑
+                                # 只有name列的情况，批量查询name值
+                                if translation_direction == 'zh_to_en':
+                                    placeholders = ','.join(['?'] * len(unique_values))
+                                    meddra_query = f"SELECT name_cn, name_en FROM meddra_merged WHERE name_cn IN ({placeholders}) AND version = ?"
+                                    cursor.execute(meddra_query, [str(v) for v in unique_values] + [meddra_version])
+                                    for row in cursor.fetchall():
+                                        translation_dict[row[0]] = row[1]
+                                else:
+                                    placeholders = ','.join(['?'] * len(unique_values))
+                                    meddra_query = f"SELECT name_en, name_cn FROM meddra_merged WHERE name_en IN ({placeholders}) AND version = ?"
+                                    cursor.execute(meddra_query, [str(v) for v in unique_values] + [meddra_version])
+                                    for row in cursor.fetchall():
+                                        translation_dict[row[0]] = row[1]
+                        finally:
+                            conn.close()
+                        
+                        # 处理每个唯一值
+                        for idx, value in enumerate(unique_values):
+                            if idx % 20 == 0:  # 每20个值显示一次进度
+                                print(f'      进度: {idx+1}/{len(unique_values)}')
                             
-                            # 如果翻译库无法匹配，使用AI翻译
-                            if not translated_value and translation_direction == 'en_to_zh':
-                                ai_result = translation_service.translate_text(
-                                    str(value), 'en', 'zh', 'medical'
-                                )
-                                if ai_result.get('success'):
-                                    translated_value = ai_result.get('translated_text', '')
-                                    translation_source = 'AI'
-                                    needs_confirmation = 'Y'  # AI翻译需要确认
+                            # 检查是否需要翻译
+                            if not should_translate_value(value, translation_direction):
+                                continue
+                            
+                            # 从批量查询结果中获取翻译
+                            translated_value = translation_dict.get(str(value), '')
+                            if translated_value:
+                                translation_source = f'meddra_merged_{meddra_version}'
+                                needs_confirmation = 'N'
+                            else:
+                                # 收集未匹配项目，稍后统一AI翻译
+                                if is_ai_translation_eligible(value):
+                                    unmatched_items['meddra'].append({
+                                        'value': str(value),
+                                        'dataset': dataset_name,
+                                        'variable': variable_name,
+                                        'index': len(coded_items)
+                                    })
+                                translated_value = ''  # 暂时为空，稍后AI翻译
+                                translation_source = 'AI'
+                                needs_confirmation = 'Y'
                             
                             coded_items.append({
                                 'dataset': dataset_name,
@@ -1862,41 +1990,95 @@ def generate_coded_list():
                             })
         
         # 处理WHODrug配置的变量
-        for whodrug_item in whodrug_config:
-            if whodrug_item.get('name'):
-                variable_name = whodrug_item['name']
-                code_variable = whodrug_item.get('code')
+        for idx, whodrug_item in enumerate(whodrug_config):
+            print(f'处理WHODrug配置项 {idx+1}/{len(whodrug_config)}: {whodrug_item.get("name_column")}')
+            if whodrug_item.get('name_column'):
+                variable_name = whodrug_item['name_column']
+                code_variable = whodrug_item.get('code_column')
                 
                 # 从合并数据中获取该变量的所有值
                 for dataset_name, dataset_info in processor.datasets.items():
                     df = dataset_info['data']
                     if variable_name in df.columns:
                         unique_values = df[variable_name].dropna().unique()
+                        # 限制处理的唯一值数量以提高性能
+                        if len(unique_values) > 100:
+                            print(f'  数据集 {dataset_name} 中变量 {variable_name} 有 {len(unique_values)} 个唯一值，限制为前100个')
+                            unique_values = unique_values[:100]
                         
-                        for value in unique_values:
-                            translated_value = ''
-                            translation_source = 'AI'  # 默认AI翻译
-                            needs_confirmation = 'N'
-                            
-                            # 根据配置进行翻译匹配
+                        print(f'    处理 {len(unique_values)} 个唯一值...')
+                        
+                        # 批量查询翻译数据以提高性能
+                        translation_dict = {}
+                        conn = sqlite3.connect('translation_db.sqlite')
+                        try:
+                            cursor = conn.cursor()
                             if code_variable and code_variable in df.columns:
-                                # 有code列的情况，使用whodrug_merged进行匹配
-                                translation_source = f'whodrug_merged_{whodrug_version}'
-                                # TODO: 实现从whodrug_merged表的匹配逻辑
+                                # 有code列的情况，批量查询code对应的翻译
+                                code_values = []
+                                value_to_code = {}
+                                for value in unique_values:
+                                    code_value = df[df[variable_name] == value][code_variable].iloc[0] if len(df[df[variable_name] == value]) > 0 else None
+                                    if code_value:
+                                        code_values.append(str(code_value))
+                                        value_to_code[str(value)] = str(code_value)
+                                
+                                if code_values:
+                                    placeholders = ','.join(['?'] * len(code_values))
+                                    whodrug_query = f"SELECT code, name_cn, name_en FROM whodrug_merged WHERE code IN ({placeholders}) AND version = ?"
+                                    cursor.execute(whodrug_query, code_values + [whodrug_version])
+                                    for row in cursor.fetchall():
+                                        code, name_cn, name_en = row
+                                        # 找到对应的value
+                                        for value, value_code in value_to_code.items():
+                                            if value_code == code:
+                                                if translation_direction == 'zh_to_en':
+                                                    translation_dict[value] = name_en
+                                                else:
+                                                    translation_dict[value] = name_cn
                             else:
-                                # 只有name列的情况，直接匹配name值
-                                translation_source = f'whodrug_merged_{whodrug_version}'
-                                # TODO: 实现从whodrug_merged表的匹配逻辑
+                                # 只有name列的情况，批量查询name值
+                                if translation_direction == 'zh_to_en':
+                                    placeholders = ','.join(['?'] * len(unique_values))
+                                    whodrug_query = f"SELECT name_cn, name_en FROM whodrug_merged WHERE name_cn IN ({placeholders}) AND version = ?"
+                                    cursor.execute(whodrug_query, [str(v) for v in unique_values] + [whodrug_version])
+                                    for row in cursor.fetchall():
+                                        translation_dict[row[0]] = row[1]
+                                else:
+                                    placeholders = ','.join(['?'] * len(unique_values))
+                                    whodrug_query = f"SELECT name_en, name_cn FROM whodrug_merged WHERE name_en IN ({placeholders}) AND version = ?"
+                                    cursor.execute(whodrug_query, [str(v) for v in unique_values] + [whodrug_version])
+                                    for row in cursor.fetchall():
+                                        translation_dict[row[0]] = row[1]
+                        finally:
+                            conn.close()
+                        
+                        # 处理每个唯一值
+                        for idx, value in enumerate(unique_values):
+                            if idx % 20 == 0:  # 每20个值显示一次进度
+                                print(f'      进度: {idx+1}/{len(unique_values)}')
                             
-                            # 如果翻译库无法匹配，使用AI翻译
-                            if not translated_value and translation_direction == 'en_to_zh':
-                                ai_result = translation_service.translate_text(
-                                    str(value), 'en', 'zh', 'medical'
-                                )
-                                if ai_result.get('success'):
-                                    translated_value = ai_result.get('translated_text', '')
-                                    translation_source = 'AI'
-                                    needs_confirmation = 'Y'  # AI翻译需要确认
+                            # 检查是否需要翻译
+                            if not should_translate_value(value, translation_direction):
+                                continue
+                            
+                            # 从批量查询结果中获取翻译
+                            translated_value = translation_dict.get(str(value), '')
+                            if translated_value:
+                                translation_source = f'whodrug_merged_{whodrug_version}'
+                                needs_confirmation = 'N'
+                            else:
+                                # 收集未匹配项目，稍后统一AI翻译
+                                if is_ai_translation_eligible(value):
+                                    unmatched_items['whodrug'].append({
+                                        'value': str(value),
+                                        'dataset': dataset_name,
+                                        'variable': variable_name,
+                                        'index': len(coded_items)
+                                    })
+                                translated_value = ''  # 暂时为空，稍后AI翻译
+                                translation_source = 'AI'
+                                needs_confirmation = 'Y'
                             
                             coded_items.append({
                                 'dataset': dataset_name,
@@ -1906,16 +2088,140 @@ def generate_coded_list():
                                 'translation_source': translation_source,
                                 'needs_confirmation': needs_confirmation
                             })
+                        
+        
+        # 统一批量AI翻译所有未匹配项目
+        print(f'\n开始统一AI翻译，MedDRA未匹配: {len(unmatched_items["meddra"])}项，WHODrug未匹配: {len(unmatched_items["whodrug"])}项')
+        
+        # 如果项目太多，只处理前50个并给出提示
+        if len(unmatched_items['meddra']) > 50:
+            print(f'⚠️  MedDRA未匹配项目过多({len(unmatched_items["meddra"])}项)，只处理前50项')
+            unmatched_items['meddra'] = unmatched_items['meddra'][:50]
+        
+        if len(unmatched_items['whodrug']) > 50:
+            print(f'⚠️  WHODrug未匹配项目过多({len(unmatched_items["whodrug"])}项)，只处理前50项')
+            unmatched_items['whodrug'] = unmatched_items['whodrug'][:50]
+        
+        # 处理MedDRA未匹配项目
+        if unmatched_items['meddra'] and len(unmatched_items['meddra']) <= 50:
+            print(f'批量AI翻译MedDRA项目: {len(unmatched_items["meddra"])}项')
+            meddra_values = [item['value'] for item in unmatched_items['meddra']]
+            
+            # 构建AI翻译提示，包含编码类型和上下文信息
+            context_info = f"这些是MedDRA编码变量的值，请进行医学术语翻译。翻译方向：{'英译中' if translation_direction == 'en_to_zh' else '中译英'}"
+            
+            try:
+                # 批量调用AI翻译
+                batch_size = 3
+                for batch_start in range(0, len(meddra_values), batch_size):
+                    batch_end = min(batch_start + batch_size, len(meddra_values))
+                    batch_values = meddra_values[batch_start:batch_end]
+                    batch_items = unmatched_items['meddra'][batch_start:batch_end]
+                    
+                    print(f'  AI翻译MedDRA批次: {batch_start+1}-{batch_end}/{len(meddra_values)}')
+                    
+                    # 构建批量翻译请求
+                    batch_text = '\n'.join([f'{i+1}. {value}' for i, value in enumerate(batch_values)])
+                    prompt = f"{context_info}\n\n待翻译内容：\n{batch_text}\n\n请按序号返回翻译结果，每行一个。"
+                    
+                    if translation_direction == 'zh_to_en':
+                        ai_result = translation_service.translate_text(prompt, 'zh', 'en', 'medical')
+                    else:
+                        ai_result = translation_service.translate_text(prompt, 'en', 'zh', 'medical')
+                    
+                    if ai_result.get('success'):
+                        translated_lines = ai_result.get('translated_text', '').strip().split('\n')
+                        print(f'    AI翻译成功，返回{len(translated_lines)}行结果')
+                        for i, item in enumerate(batch_items):
+                            if i < len(translated_lines):
+                                # 提取翻译结果（去除序号）
+                                translated = translated_lines[i].strip()
+                                if '. ' in translated:
+                                    translated = translated.split('. ', 1)[1]
+                                coded_items[item['index']]['translated_value'] = translated
+                                print(f'      更新项目{item["index"]}: "{item["value"]}" -> "{translated}"')
+                    else:
+                        print(f'    AI翻译失败: {ai_result.get("error", "未知错误")}')
+            except Exception as e:
+                print(f'MedDRA批量AI翻译失败: {e}')
+        
+        # 处理WHODrug未匹配项目
+        if unmatched_items['whodrug'] and len(unmatched_items['whodrug']) <= 50:
+            print(f'批量AI翻译WHODrug项目: {len(unmatched_items["whodrug"])}项')
+            whodrug_values = [item['value'] for item in unmatched_items['whodrug']]
+            
+            # 构建AI翻译提示，包含编码类型和上下文信息
+            context_info = f"这些是WHODrug药物编码变量的值，请进行药物术语翻译。翻译方向：{'英译中' if translation_direction == 'en_to_zh' else '中译英'}"
+            
+            try:
+                # 批量调用AI翻译
+                batch_size = 3
+                for batch_start in range(0, len(whodrug_values), batch_size):
+                    batch_end = min(batch_start + batch_size, len(whodrug_values))
+                    batch_values = whodrug_values[batch_start:batch_end]
+                    batch_items = unmatched_items['whodrug'][batch_start:batch_end]
+                    
+                    print(f'  AI翻译WHODrug批次: {batch_start+1}-{batch_end}/{len(whodrug_values)}')
+                    
+                    # 构建批量翻译请求
+                    batch_text = '\n'.join([f'{i+1}. {value}' for i, value in enumerate(batch_values)])
+                    prompt = f"{context_info}\n\n待翻译内容：\n{batch_text}\n\n请按序号返回翻译结果，每行一个。"
+                    
+                    if translation_direction == 'zh_to_en':
+                        ai_result = translation_service.translate_text(prompt, 'zh', 'en', 'medical')
+                    else:
+                        ai_result = translation_service.translate_text(prompt, 'en', 'zh', 'medical')
+                    
+                    if ai_result.get('success'):
+                        translated_lines = ai_result.get('translated_text', '').strip().split('\n')
+                        print(f'    AI翻译成功，返回{len(translated_lines)}行结果')
+                        for i, item in enumerate(batch_items):
+                            if i < len(translated_lines):
+                                # 提取翻译结果（去除序号）
+                                translated = translated_lines[i].strip()
+                                if '. ' in translated:
+                                    translated = translated.split('. ', 1)[1]
+                                coded_items[item['index']]['translated_value'] = translated
+                                print(f'      更新项目{item["index"]}: "{item["value"]}" -> "{translated}"')
+                    else:
+                        print(f'    AI翻译失败: {ai_result.get("error", "未知错误")}')
+            except Exception as e:
+                print(f'WHODrug批量AI翻译失败: {e}')
+        
+        # 检测重复值并标记待确认
+        # 创建一个字典来跟踪每个变量-值组合的翻译结果
+        value_translations = {}
+        for item in coded_items:
+            key = f"{item['variable']}|{item['value']}"
+            if key not in value_translations:
+                value_translations[key] = set()
+            if item['translated_value']:  # 只记录有翻译值的项
+                value_translations[key].add(item['translated_value'])
+        
+        # 标记有多个翻译结果的项为待确认
+        for item in coded_items:
+            key = f"{item['variable']}|{item['value']}"
+            if len(value_translations.get(key, set())) > 1:
+                item['needs_confirmation'] = 'Y'
+                item['highlight'] = True  # 添加高亮标记
+            else:
+                item['highlight'] = False
+        
+        # 限制返回的项目数量以提高响应速度
+        max_items = 500  # 限制最多返回500个项目
+        limited_coded_items = coded_items[:max_items] if len(coded_items) > max_items else coded_items
         
         result = {
             'success': True,
-            'message': '编码清单生成成功',
+            'message': f'编码清单生成成功（显示前{len(limited_coded_items)}项，共{len(coded_items)}项）',
             'data': {
                 'translation_direction': translation_direction,
                 'meddra_version': meddra_version,
                 'whodrug_version': whodrug_version,
-                'coded_items': coded_items,
-                'total_count': len(coded_items)
+                'coded_items': limited_coded_items,
+                'total_count': len(coded_items),
+                'displayed_count': len(limited_coded_items),
+                'is_limited': len(coded_items) > max_items
             }
         }
         
@@ -1944,10 +2250,10 @@ def generate_uncoded_list():
         if not translation_config:
             return jsonify({'success': False, 'message': '未找到翻译库配置，请先保存配置'}), 400
         
-        # 获取合并数据
-        processor = get_merge_processor(path)
-        if not processor or not processor.datasets:
-            return jsonify({'success': False, 'message': '未找到合并数据，请先执行合并操作'}), 400
+        # 使用全局processor实例获取合并后的数据
+        # 确保processor已经加载了数据
+        if not processor.datasets:
+            processor.read_sas_files(path)
         
         # 获取MedDRA和WHODrug配置表中的变量名
         meddra_config = translation_config.get('meddra_config', [])
@@ -1956,11 +2262,11 @@ def generate_uncoded_list():
         # 收集编码变量名
         coded_variables = set()
         for item in meddra_config:
-            if item.get('name'):
-                coded_variables.add(item['name'])
+            if item.get('name_column'):
+                coded_variables.add(item['name_column'])
         for item in whodrug_config:
-            if item.get('name'):
-                coded_variables.add(item['name'])
+            if item.get('name_column'):
+                coded_variables.add(item['name_column'])
         
         # 生成非编码清单
         uncoded_items = []
@@ -2043,10 +2349,10 @@ def generate_dataset_label():
         if not ig_version:
             return jsonify({'success': False, 'message': '未找到IG版本配置'}), 400
         
-        # 获取合并数据
-        processor = get_merge_processor(path)
-        if not processor or not processor.datasets:
-            return jsonify({'success': False, 'message': '未找到合并数据，请先执行合并操作'}), 400
+        # 使用全局processor实例获取合并后的数据
+        # 确保processor已经加载了数据
+        if not processor.datasets:
+            processor.read_sas_files(path)
         
         # 生成数据集标签清单
         dataset_labels = []
@@ -2119,10 +2425,10 @@ def generate_variable_label():
         if not ig_version:
             return jsonify({'success': False, 'message': '未找到IG版本配置'}), 400
         
-        # 获取合并数据
-        processor = get_merge_processor(path)
-        if not processor or not processor.datasets:
-            return jsonify({'success': False, 'message': '未找到合并数据，请先执行合并操作'}), 400
+        # 使用全局processor实例获取合并后的数据
+        # 确保processor已经加载了数据
+        if not processor.datasets:
+            processor.read_sas_files(path)
         
         # 生成变量标签清单
         variable_labels = []

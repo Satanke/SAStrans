@@ -4025,7 +4025,7 @@ if (translationLibraryTab) {
 function displayCodedListResults(data) {
     console.log('显示编码清单结果:', data);
     
-    const container = document.getElementById('translationResults');
+    const container = document.getElementById('translationContentArea');
     if (!container) {
         console.error('未找到翻译结果容器');
         return;
@@ -4105,7 +4105,7 @@ function displayCodedListResults(data) {
 function displayUncodedListResults(data) {
     console.log('显示非编码清单结果:', data);
     
-    const container = document.getElementById('translationResults');
+    const container = document.getElementById('translationContentArea');
     if (!container) {
         console.error('未找到翻译结果容器');
         return;
@@ -4185,7 +4185,7 @@ function displayUncodedListResults(data) {
 function displayDatasetLabelResults(data) {
     console.log('显示数据集标签结果:', data);
     
-    const container = document.getElementById('translationResults');
+    const container = document.getElementById('translationContentArea');
     if (!container) {
         console.error('未找到翻译结果容器');
         return;
@@ -4263,7 +4263,7 @@ function displayDatasetLabelResults(data) {
 function displayVariableLabelResults(data) {
     console.log('显示变量标签结果:', data);
     
-    const container = document.getElementById('translationResults');
+    const container = document.getElementById('translationContentArea');
     if (!container) {
         console.error('未找到翻译结果容器');
         return;
