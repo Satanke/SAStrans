@@ -267,13 +267,13 @@ class DatabaseManager:
             cursor = conn.cursor()
             
             # 获取MedDRA表
-            cursor.execute('SELECT name, description, record_count FROM meddra_tables ORDER BY name')
-            meddra_tables = [{'name': row[0], 'description': row[1], 'record_count': row[2]} 
+            cursor.execute('SELECT name, description, record_count, version FROM meddra_tables ORDER BY name')
+            meddra_tables = [{'name': row[0], 'description': row[1], 'record_count': row[2], 'version': row[3]} 
                            for row in cursor.fetchall()]
             
             # 获取WhoDrug表
-            cursor.execute('SELECT name, description, record_count FROM whodrug_tables ORDER BY name')
-            whodrug_tables = [{'name': row[0], 'description': row[1], 'record_count': row[2]} 
+            cursor.execute('SELECT name, description, record_count, version FROM whodrug_tables ORDER BY name')
+            whodrug_tables = [{'name': row[0], 'description': row[1], 'record_count': row[2], 'version': row[3]} 
                             for row in cursor.fetchall()]
             
             return {
@@ -337,6 +337,7 @@ class SASDataProcessor:
         self.merged_datasets = {}
         self.hide_supp_in_preview = False
         self.translation_direction = 'zh_to_en'  # 默认中译英
+        self.current_path = None  # 当前数据路径
 
     @staticmethod
     def _normalize_key_series(series: pd.Series) -> pd.Series:
@@ -418,8 +419,9 @@ class SASDataProcessor:
                         self.datasets[dataset_name] = dataset_data
             
             if mode == 'SDTM':
-                # 仅构建预览视图，不直接改写主表
+                # 构建预览视图并执行SUPP数据合并
                 self._build_preview_views()
+                self._auto_merge_all_supp_data()  # 执行SUPP数据合并
             
             success_count = len(self.datasets)
             total_count = len(sas_files)
@@ -1175,6 +1177,9 @@ class SASDataProcessor:
 
                 # 重新构建主表预览视图
                 self._build_preview_views()
+                
+                # 自动将所有SUPP数据集中的QNAM转置并合并到对应的主数据集中
+                self._auto_merge_all_supp_data()
 
             return True, "变量合并成功"
         except Exception as e:
@@ -1182,6 +1187,46 @@ class SASDataProcessor:
             print('merge_variables error:', e)
             return False, f"变量合并失败: {str(e)}"
 
+    def _auto_merge_all_supp_data(self) -> None:
+        """自动将所有SUPP数据集中的QNAM转置并合并到对应的主数据集中"""
+        try:
+            # 获取所有SUPP数据集
+            supp_datasets = {name: data for name, data in self.datasets.items() if name.upper().startswith('SUPP')}
+            
+            for supp_name, supp_entry in supp_datasets.items():
+                supp_df = supp_entry.get('raw_data', supp_entry['data']).copy()
+                
+                # 检查必要的列
+                if 'QNAM' not in supp_df.columns or 'QVAL' not in supp_df.columns:
+                    continue
+                    
+                # 按RDOMAIN分组处理
+                if 'RDOMAIN' in supp_df.columns:
+                    for rdomain in supp_df['RDOMAIN'].dropna().unique():
+                        rdomain_str = str(rdomain).upper()
+                        
+                        # 找到对应的主数据集
+                        target_dataset = None
+                        for ds_name in self.datasets.keys():
+                            if ds_name.upper() == rdomain_str and not ds_name.upper().startswith('SUPP'):
+                                target_dataset = ds_name
+                                break
+                        
+                        if not target_dataset:
+                            continue
+                            
+                        # 获取该RDOMAIN的SUPP数据
+                        rdomain_supp = supp_df[supp_df['RDOMAIN'].astype(str).str.upper() == rdomain_str].copy()
+                        
+                        if rdomain_supp.empty:
+                            continue
+                            
+                        # 调用现有的SUPP合并方法
+                        self._merge_supp_data(supp_name, target_dataset, rdomain_supp)
+                        
+        except Exception as e:
+            print(f'_auto_merge_all_supp_data error: {e}')
+    
     def _refresh_main_from_supp(self, supp_name: str, affected_qnams: set) -> None:
         """将指定 SUPP 的受影响 QNAM 刷新到各主表已存在的映射列（覆盖写入）。"""
         supp_entry = self.datasets.get(supp_name)
@@ -1599,21 +1644,29 @@ def check_existing_library():
 def get_meddra_versions():
     """获取MedDRA版本列表"""
     try:
-        # 从数据库中获取MedDRA表信息
-        tables = db_manager.get_database_tables()
-        meddra_versions = []
+        conn = sqlite3.connect(db_manager.db_path)
+        cursor = conn.cursor()
         
-        for table in tables.get('meddra', []):
-            # 从表名或描述中提取版本信息
-            version = table.get('name', '').replace('meddra_', '').replace('_', '.')
+        # 直接从meddra_merged表中获取version字段的非重复值
+        cursor.execute('SELECT DISTINCT version FROM meddra_merged WHERE version IS NOT NULL ORDER BY version')
+        versions = cursor.fetchall()
+        
+        meddra_versions = []
+        for version_row in versions:
+            version = version_row[0]
             if version:
+                # 获取该版本的记录数
+                cursor.execute('SELECT COUNT(*) FROM meddra_merged WHERE version = ?', (version,))
+                count = cursor.fetchone()[0]
+                
                 meddra_versions.append({
                     'version': version,
-                    'name': table.get('name', ''),
-                    'description': table.get('description', ''),
-                    'record_count': table.get('record_count', 0)
+                    'name': f'MedDRA {version}',
+                    'description': f'MedDRA版本 {version}',
+                    'record_count': count
                 })
         
+        conn.close()
         return jsonify({'versions': meddra_versions})
     except Exception as e:
         return jsonify({'versions': [], 'error': str(e)})
@@ -1622,21 +1675,29 @@ def get_meddra_versions():
 def get_whodrug_versions():
     """获取WHODrug版本列表"""
     try:
-        # 从数据库中获取WHODrug表信息
-        tables = db_manager.get_database_tables()
-        whodrug_versions = []
+        conn = sqlite3.connect(db_manager.db_path)
+        cursor = conn.cursor()
         
-        for table in tables.get('whodrug', []):
-            # 从表名或描述中提取版本信息
-            version = table.get('name', '').replace('whodrug_', '').replace('_', '.')
+        # 直接从whodrug_merged表中获取version字段的非重复值
+        cursor.execute('SELECT DISTINCT version FROM whodrug_merged WHERE version IS NOT NULL ORDER BY version')
+        versions = cursor.fetchall()
+        
+        whodrug_versions = []
+        for version_row in versions:
+            version = version_row[0]
             if version:
+                # 获取该版本的记录数
+                cursor.execute('SELECT COUNT(*) FROM whodrug_merged WHERE version = ?', (version,))
+                count = cursor.fetchone()[0]
+                
                 whodrug_versions.append({
                     'version': version,
-                    'name': table.get('name', ''),
-                    'description': table.get('description', ''),
-                    'record_count': table.get('record_count', 0)
+                    'name': f'WHODrug {version}',
+                    'description': f'WHODrug版本 {version}',
+                    'record_count': count
                 })
         
+        conn.close()
         return jsonify({'versions': whodrug_versions})
     except Exception as e:
         return jsonify({'versions': [], 'error': str(e)})
@@ -1867,16 +1928,21 @@ def generate_coded_list():
         print(f'处理后的版本信息 - MedDRA: {meddra_version}, WHODrug: {whodrug_version}')
         
         # 使用全局processor实例获取合并后的数据
-        # 检查是否已经加载了相同路径的数据
-        if not processor.datasets or getattr(processor, 'current_path', None) != path:
-            print(f'开始读取SAS文件: {path}')
-            success, message = processor.read_sas_files(path)
+        # 检查是否已经加载了数据，如果没有数据或路径不匹配才重新读取
+        if not processor.datasets or processor.current_path != path:
+            print(f'processor.datasets为空或路径不匹配，开始读取SAS文件: {path}')
+            success, message = processor.read_sas_files(path, mode='SDTM')  # 使用SDTM模式以启用SUPP数据合并
             if not success:
                 return jsonify({'success': False, 'message': f'读取SAS文件失败: {message}'}), 500
             processor.current_path = path  # 记录当前路径
             print(f'SAS文件读取完成，共加载 {len(processor.datasets)} 个数据集')
+        else:
+            print(f'使用已存在的processor数据，共 {len(processor.datasets)} 个数据集（包含合并后的数据）')
+            # 路径匹配且有数据，直接使用现有数据（包含合并后的数据）
         
         coded_items = []
+        # 用于去重的集合，存储 (数据集名称, 变量名称, 原始值) 的组合
+        processed_items = set()
         # 统一收集所有未匹配的项目，用于批量AI翻译
         unmatched_items = {
             'meddra': [],  # MedDRA未匹配项目
@@ -1897,14 +1963,8 @@ def generate_coded_list():
                     df = dataset_info['data']
                     if variable_name in df.columns:
                         unique_values = df[variable_name].dropna().unique()
-                        # 限制处理的唯一值数量以提高性能
-                        if len(unique_values) > 100:
-                            print(f'  数据集 {dataset_name} 中变量 {variable_name} 有 {len(unique_values)} 个唯一值，限制为前100个')
-                            unique_values = unique_values[:100]
-                        # 限制处理的唯一值数量以提高性能
-                        if len(unique_values) > 100:
-                            print(f'  数据集 {dataset_name} 中变量 {variable_name} 有 {len(unique_values)} 个唯一值，限制为前100个')
-                            unique_values = unique_values[:100]
+                        # 不再限制处理的唯一值数量，处理所有数据
+                        print(f'  数据集 {dataset_name} 中变量 {variable_name} 有 {len(unique_values)} 个唯一值')
                         
                         print(f'    处理 {len(unique_values)} 个唯一值...')
                         
@@ -1914,28 +1974,56 @@ def generate_coded_list():
                         try:
                             cursor = conn.cursor()
                             if code_variable and code_variable in df.columns:
-                                # 有code列的情况，批量查询code对应的翻译
-                                code_values = []
-                                value_to_code = {}
-                                for value in unique_values:
-                                    code_value = df[df[variable_name] == value][code_variable].iloc[0] if len(df[df[variable_name] == value]) > 0 else None
-                                    if code_value:
-                                        code_values.append(str(code_value))
-                                        value_to_code[str(value)] = str(code_value)
+                                # 有code列的情况，直接使用code列的值进行匹配
+                                # 获取code列的唯一值
+                                code_unique_values = df[code_variable].dropna().unique()
                                 
-                                if code_values:
-                                    placeholders = ','.join(['?'] * len(code_values))
+                                if len(code_unique_values) > 0:
+                                    # 处理code值格式，将浮点数转换为整数字符串
+                                    processed_codes = []
+                                    for code in code_unique_values:
+                                        if pd.notna(code):
+                                            try:
+                                                if isinstance(code, float) and code.is_integer():
+                                                    processed_codes.append(str(int(code)))
+                                                else:
+                                                    processed_codes.append(str(code).strip())
+                                            except:
+                                                processed_codes.append(str(code).strip())
+                                    
+                                    placeholders = ','.join(['?'] * len(processed_codes))
                                     meddra_query = f"SELECT code, name_cn, name_en FROM meddra_merged WHERE code IN ({placeholders}) AND version = ?"
-                                    cursor.execute(meddra_query, code_values + [meddra_version])
+                                    cursor.execute(meddra_query, processed_codes + [meddra_version])
+                                    
+                                    # 建立code到翻译的映射
+                                    code_to_translation = {}
                                     for row in cursor.fetchall():
                                         code, name_cn, name_en = row
-                                        # 找到对应的value
-                                        for value, value_code in value_to_code.items():
-                                            if value_code == code:
-                                                if translation_direction == 'zh_to_en':
-                                                    translation_dict[value] = name_en
+                                        if translation_direction == 'zh_to_en':
+                                            code_to_translation[str(code).strip()] = name_en
+                                        else:
+                                            code_to_translation[str(code).strip()] = name_cn
+                                    
+                                    # 为每个name值找到对应的code值，然后获取翻译
+                                for value in unique_values:
+                                    # 找到该name值对应的code值
+                                    matching_rows = df[df[variable_name] == value]
+                                    if len(matching_rows) > 0:
+                                        raw_code = matching_rows[code_variable].iloc[0]
+                                        # 处理数字类型的code值，去除.0后缀
+                                        if pd.notna(raw_code):
+                                            try:
+                                                if isinstance(raw_code, float) and raw_code.is_integer():
+                                                    code_value = str(int(raw_code))
                                                 else:
-                                                    translation_dict[value] = name_cn
+                                                    code_value = str(raw_code).strip()
+                                            except:
+                                                code_value = str(raw_code).strip()
+                                        else:
+                                            code_value = ''
+                                        
+                                        if code_value in code_to_translation:
+                                            translation_dict[str(value)] = code_to_translation[code_value]
                             else:
                                 # 只有name列的情况，批量查询name值
                                 if translation_direction == 'zh_to_en':
@@ -1962,8 +2050,39 @@ def generate_coded_list():
                             if not should_translate_value(value, translation_direction):
                                 continue
                             
-                            # 从批量查询结果中获取翻译
-                            translated_value = translation_dict.get(str(value), '')
+                            # 获取对应的code值（如果有code列配置）
+                            code_value = ''
+                            if code_variable and code_variable in df.columns:
+                                matching_rows = df[df[variable_name] == value]
+                                if len(matching_rows) > 0:
+                                    raw_code = matching_rows[code_variable].iloc[0]
+                                    # 处理数字类型的code值，去除.0后缀
+                                    if pd.notna(raw_code):
+                                        try:
+                                            # 如果是浮点数且为整数值，转换为整数字符串
+                                            if isinstance(raw_code, float) and raw_code.is_integer():
+                                                code_value = str(int(raw_code))
+                                            else:
+                                                code_value = str(raw_code).strip()
+                                        except:
+                                            code_value = str(raw_code).strip()
+                            
+                            # 去重检查：按照数据集名称、变量名称、原始值和code值进行去重
+                            item_key = (dataset_name, variable_name, str(value), code_value)
+                            if item_key in processed_items:
+                                continue  # 跳过重复项
+                            processed_items.add(item_key)
+                            
+                            # 优先使用code值进行匹配，如果没有code值则使用name值匹配
+                            translated_value = ''
+                            if code_value and code_variable:
+                                # 有code值时，优先使用code值匹配
+                                translated_value = code_to_translation.get(code_value, '')
+                            
+                            if not translated_value:
+                                # code值匹配失败或没有code值时，使用name值匹配
+                                translated_value = translation_dict.get(str(value), '')
+                            
                             if translated_value:
                                 translation_source = f'meddra_merged_{meddra_version}'
                                 needs_confirmation = 'N'
@@ -1974,6 +2093,7 @@ def generate_coded_list():
                                         'value': str(value),
                                         'dataset': dataset_name,
                                         'variable': variable_name,
+                                        'code': code_value,
                                         'index': len(coded_items)
                                     })
                                 translated_value = ''  # 暂时为空，稍后AI翻译
@@ -1984,6 +2104,7 @@ def generate_coded_list():
                                 'dataset': dataset_name,
                                 'variable': variable_name,
                                 'value': str(value),
+                                'code': code_value,
                                 'translated_value': translated_value,
                                 'translation_source': translation_source,
                                 'needs_confirmation': needs_confirmation
@@ -2001,10 +2122,8 @@ def generate_coded_list():
                     df = dataset_info['data']
                     if variable_name in df.columns:
                         unique_values = df[variable_name].dropna().unique()
-                        # 限制处理的唯一值数量以提高性能
-                        if len(unique_values) > 100:
-                            print(f'  数据集 {dataset_name} 中变量 {variable_name} 有 {len(unique_values)} 个唯一值，限制为前100个')
-                            unique_values = unique_values[:100]
+                        # 不再限制处理的唯一值数量，处理所有数据
+                        print(f'  数据集 {dataset_name} 中变量 {variable_name} 有 {len(unique_values)} 个唯一值')
                         
                         print(f'    处理 {len(unique_values)} 个唯一值...')
                         
@@ -2014,28 +2133,44 @@ def generate_coded_list():
                         try:
                             cursor = conn.cursor()
                             if code_variable and code_variable in df.columns:
-                                # 有code列的情况，批量查询code对应的翻译
-                                code_values = []
-                                value_to_code = {}
-                                for value in unique_values:
-                                    code_value = df[df[variable_name] == value][code_variable].iloc[0] if len(df[df[variable_name] == value]) > 0 else None
-                                    if code_value:
-                                        code_values.append(str(code_value))
-                                        value_to_code[str(value)] = str(code_value)
+                                # 有code列的情况，直接使用code列的值进行匹配
+                                # 获取code列的唯一值
+                                code_unique_values = df[code_variable].dropna().unique()
                                 
-                                if code_values:
-                                    placeholders = ','.join(['?'] * len(code_values))
+                                if len(code_unique_values) > 0:
+                                    # 处理code值格式，将浮点数转换为整数字符串
+                                    processed_codes = []
+                                    for code in code_unique_values:
+                                        if pd.notna(code):
+                                            try:
+                                                if isinstance(code, float) and code.is_integer():
+                                                    processed_codes.append(str(int(code)))
+                                                else:
+                                                    processed_codes.append(str(code).strip())
+                                            except:
+                                                processed_codes.append(str(code).strip())
+                                    
+                                    placeholders = ','.join(['?'] * len(processed_codes))
                                     whodrug_query = f"SELECT code, name_cn, name_en FROM whodrug_merged WHERE code IN ({placeholders}) AND version = ?"
-                                    cursor.execute(whodrug_query, code_values + [whodrug_version])
+                                    cursor.execute(whodrug_query, processed_codes + [whodrug_version])
+                                    
+                                    # 建立code到翻译的映射
+                                    code_to_translation = {}
                                     for row in cursor.fetchall():
                                         code, name_cn, name_en = row
-                                        # 找到对应的value
-                                        for value, value_code in value_to_code.items():
-                                            if value_code == code:
-                                                if translation_direction == 'zh_to_en':
-                                                    translation_dict[value] = name_en
-                                                else:
-                                                    translation_dict[value] = name_cn
+                                        if translation_direction == 'zh_to_en':
+                                            code_to_translation[str(code).strip()] = name_en
+                                        else:
+                                            code_to_translation[str(code).strip()] = name_cn
+                                    
+                                    # 为每个name值找到对应的code值，然后获取翻译
+                                for value in unique_values:
+                                    # 找到该name值对应的code值
+                                    matching_rows = df[df[variable_name] == value]
+                                    if len(matching_rows) > 0:
+                                        code_value = str(matching_rows[code_variable].iloc[0]).strip()
+                                        if code_value in code_to_translation:
+                                            translation_dict[str(value)] = code_to_translation[code_value]
                             else:
                                 # 只有name列的情况，批量查询name值
                                 if translation_direction == 'zh_to_en':
@@ -2062,8 +2197,39 @@ def generate_coded_list():
                             if not should_translate_value(value, translation_direction):
                                 continue
                             
-                            # 从批量查询结果中获取翻译
-                            translated_value = translation_dict.get(str(value), '')
+                            # 获取对应的code值（如果有code列配置）
+                            code_value = ''
+                            if code_variable and code_variable in df.columns:
+                                matching_rows = df[df[variable_name] == value]
+                                if len(matching_rows) > 0:
+                                    raw_code = matching_rows[code_variable].iloc[0]
+                                    # 处理数字类型的code值，去除.0后缀
+                                    if pd.notna(raw_code):
+                                        try:
+                                            # 如果是浮点数且为整数值，转换为整数字符串
+                                            if isinstance(raw_code, float) and raw_code.is_integer():
+                                                code_value = str(int(raw_code))
+                                            else:
+                                                code_value = str(raw_code).strip()
+                                        except:
+                                            code_value = str(raw_code).strip()
+                            
+                            # 去重检查：按照数据集名称、变量名称、原始值和code值进行去重
+                            item_key = (dataset_name, variable_name, str(value), code_value)
+                            if item_key in processed_items:
+                                continue  # 跳过重复项
+                            processed_items.add(item_key)
+                            
+                            # 优先使用code值进行匹配，如果没有code值则使用name值匹配
+                            translated_value = ''
+                            if code_value and code_variable:
+                                # 有code值时，优先使用code值匹配
+                                translated_value = code_to_translation.get(code_value, '')
+                            
+                            if not translated_value:
+                                # code值匹配失败或没有code值时，使用name值匹配
+                                translated_value = translation_dict.get(str(value), '')
+                            
                             if translated_value:
                                 translation_source = f'whodrug_merged_{whodrug_version}'
                                 needs_confirmation = 'N'
@@ -2074,6 +2240,7 @@ def generate_coded_list():
                                         'value': str(value),
                                         'dataset': dataset_name,
                                         'variable': variable_name,
+                                        'code': code_value,
                                         'index': len(coded_items)
                                     })
                                 translated_value = ''  # 暂时为空，稍后AI翻译
@@ -2084,6 +2251,7 @@ def generate_coded_list():
                                 'dataset': dataset_name,
                                 'variable': variable_name,
                                 'value': str(value),
+                                'code': code_value,
                                 'translated_value': translated_value,
                                 'translation_source': translation_source,
                                 'needs_confirmation': needs_confirmation
@@ -2207,21 +2375,26 @@ def generate_coded_list():
             else:
                 item['highlight'] = False
         
-        # 限制返回的项目数量以提高响应速度
-        max_items = 500  # 限制最多返回500个项目
-        limited_coded_items = coded_items[:max_items] if len(coded_items) > max_items else coded_items
+        # 对编码清单进行排序：按数据集、变量名、原始值、code列排序
+        coded_items.sort(key=lambda x: (
+            x.get('dataset', ''),
+            x.get('variable', ''),
+            x.get('value', ''),
+            x.get('code', '')
+        ))
         
+        # 不再限制返回的项目数量，返回所有项目
         result = {
             'success': True,
-            'message': f'编码清单生成成功（显示前{len(limited_coded_items)}项，共{len(coded_items)}项）',
+            'message': f'编码清单生成成功，共{len(coded_items)}项',
             'data': {
                 'translation_direction': translation_direction,
                 'meddra_version': meddra_version,
                 'whodrug_version': whodrug_version,
-                'coded_items': limited_coded_items,
+                'coded_items': coded_items,
                 'total_count': len(coded_items),
-                'displayed_count': len(limited_coded_items),
-                'is_limited': len(coded_items) > max_items
+                'displayed_count': len(coded_items),
+                'is_limited': False
             }
         }
         
@@ -2242,6 +2415,16 @@ def generate_uncoded_list():
         
         translation_direction = data.get('translation_direction')
         path = data.get('path')
+        
+        # 分页参数
+        page = data.get('page', 1)  # 页码，默认第1页
+        page_size = data.get('page_size', 100)  # 每页大小，默认100条
+        
+        # 验证分页参数
+        if page < 1:
+            page = 1
+        if page_size < 1 or page_size > 1000:  # 限制每页最大1000条
+            page_size = 100
         
         # 获取翻译库配置
         db_manager = DatabaseManager()
@@ -2285,13 +2468,58 @@ def generate_uncoded_list():
                         translation_source = 'metadata'  # 使用metadata进行翻译
                         needs_confirmation = 'Y'  # 非编码项需要确认
                         
-                        # TODO: 实现从metadata表的匹配逻辑
+                        # 从metadata表匹配翻译
+                        conn = sqlite3.connect('translation_db.sqlite')
+                        cursor = conn.cursor()
+                        
+                        try:
+                            # 根据翻译方向查询metadata表
+                            if translation_direction == 'zh_to_en':
+                                # 中译英：用原始值匹配__TEST_CN，获取__TEST_EN
+                                cursor.execute("""
+                                    SELECT __TEST_EN FROM metadata 
+                                    WHERE __TEST_CN = ? AND __TEST_EN IS NOT NULL AND __TEST_EN != ''
+                                """, (str(value),))
+                            else:
+                                # 英译中：用原始值匹配__TEST_EN，获取__TEST_CN
+                                cursor.execute("""
+                                    SELECT __TEST_CN FROM metadata 
+                                    WHERE __TEST_EN = ? AND __TEST_CN IS NOT NULL AND __TEST_CN != ''
+                                """, (str(value),))
+                            
+                            metadata_results = cursor.fetchall()
+                            
+                            if metadata_results:
+                                # 检查是否有多个翻译结果
+                                unique_translations = list(set([result[0] for result in metadata_results]))
+                                
+                                if len(unique_translations) == 1:
+                                    translated_value = unique_translations[0]
+                                    needs_confirmation = 'N'  # metadata匹配不需要确认
+                                elif len(unique_translations) > 1:
+                                    # 多个翻译结果，需要高亮确认
+                                    translated_value = ' | '.join(unique_translations)
+                                    needs_confirmation = 'Y'  # 多个结果需要确认
+                                    translation_source = 'metadata_multiple'
+                        
+                        except Exception as metadata_error:
+                            print(f"Metadata查询错误: {metadata_error}")
+                        finally:
+                            conn.close()
                         
                         # 如果metadata无法匹配，使用AI翻译
-                        if not translated_value and translation_direction == 'en_to_zh':
-                            ai_result = translation_service.translate_text(
-                                str(value), 'en', 'zh', 'medical'
-                            )
+                        if not translated_value:
+                            if translation_direction == 'en_to_zh':
+                                ai_result = translation_service.translate_text(
+                                    str(value), 'en', 'zh', 'medical'
+                                )
+                            elif translation_direction == 'zh_to_en':
+                                ai_result = translation_service.translate_text(
+                                    str(value), 'zh', 'en', 'medical'
+                                )
+                            else:
+                                ai_result = {'success': False}
+                            
                             if ai_result.get('success'):
                                 translated_value = ai_result.get('translated_text', '')
                                 translation_source = 'AI'
@@ -2306,13 +2534,50 @@ def generate_uncoded_list():
                             'needs_confirmation': needs_confirmation
                         })
         
+        # 检测重复值并标记需要确认的项目
+        value_translations = {}
+        for item in uncoded_items:
+            key = f"{item['variable']}|{item['value']}"
+            if key not in value_translations:
+                value_translations[key] = set()
+            if item['translated_value']:
+                value_translations[key].add(item['translated_value'])
+        
+        # 标记有多个翻译结果的项目
+        for item in uncoded_items:
+            key = f"{item['variable']}|{item['value']}"
+            if len(value_translations.get(key, set())) > 1:
+                item['needs_confirmation'] = 'Y'
+                item['highlight'] = True  # 添加高亮标记
+            else:
+                item['highlight'] = False
+        
+        # 对非编码清单进行排序：按数据集、变量名、原始值排序
+        uncoded_items.sort(key=lambda x: (x['dataset'], x['variable'], x['value']))
+        
+        # 计算分页
+        total_count = len(uncoded_items)
+        start_index = (page - 1) * page_size
+        end_index = start_index + page_size
+        paginated_items = uncoded_items[start_index:end_index]
+        
+        # 计算总页数
+        total_pages = (total_count + page_size - 1) // page_size
+        
         result = {
             'success': True,
             'message': '非编码清单生成成功',
             'data': {
                 'translation_direction': translation_direction,
-                'uncoded_items': uncoded_items,
-                'total_count': len(uncoded_items)
+                'uncoded_items': paginated_items,
+                'pagination': {
+                    'current_page': page,
+                    'page_size': page_size,
+                    'total_count': total_count,
+                    'total_pages': total_pages,
+                    'has_next': page < total_pages,
+                    'has_prev': page > 1
+                }
             }
         }
         
@@ -2500,72 +2765,221 @@ class DeepSeekTranslationService:
             'Content-Type': 'application/json',
             'Authorization': f'Bearer {self.api_key}'
         }
+        self.max_retries = 3
+        self.timeout = 60  # 增加超时时间到60秒
+        
+        # 性能统计
+        self.stats = {
+            'total_requests': 0,
+            'successful_requests': 0,
+            'failed_requests': 0,
+            'total_time': 0,
+            'retry_count': 0
+        }
+    
+    def get_stats(self):
+        """获取翻译统计信息"""
+        if self.stats['total_requests'] > 0:
+            success_rate = (self.stats['successful_requests'] / self.stats['total_requests']) * 100
+            avg_time = self.stats['total_time'] / self.stats['total_requests']
+        else:
+            success_rate = 0
+            avg_time = 0
+        
+        return {
+            'total_requests': self.stats['total_requests'],
+            'successful_requests': self.stats['successful_requests'],
+            'failed_requests': self.stats['failed_requests'],
+            'success_rate': f'{success_rate:.1f}%',
+            'average_time': f'{avg_time:.2f}s',
+            'retry_count': self.stats['retry_count']
+        }
     
     def translate_text(self, text, source_lang='en', target_lang='zh', context='medical'):
-        """翻译文本"""
-        try:
-            if not self.api_key:
-                raise ValueError('DeepSeek API密钥未配置')
-            
-            # 构建翻译提示词
-            if context == 'medical':
-                system_prompt = f"你是一个专业的临床医学SAS数据集翻译专家。请将以下{source_lang}文本准确翻译为{target_lang}，保持医学术语的专业性和准确性。"
-            else:
-                system_prompt = f"请将以下{source_lang}文本翻译为{target_lang}，保持原意和专业性。"
-            
-            payload = {
-                'model': 'deepseek-chat',
-                'messages': [
-                    {'role': 'system', 'content': system_prompt},
-                    {'role': 'user', 'content': text}
-                ],
-                'temperature': 0.1,
-                'max_tokens': 2000
-            }
-            
-            response = requests.post(self.base_url, headers=self.headers, json=payload, timeout=30)
-            response.raise_for_status()
-            
-            result = response.json()
-            translated_text = result['choices'][0]['message']['content'].strip()
-            
+        """翻译文本，带重试机制和性能统计"""
+        import time
+        start_time = time.time()
+        self.stats['total_requests'] += 1
+        
+        if not self.api_key:
+            self.stats['failed_requests'] += 1
             return {
+                'success': False,
+                'error': 'DeepSeek API密钥未配置',
+                'original_text': text
+            }
+        
+        # 构建翻译提示词
+        if context == 'medical':
+            system_prompt = f"你是一个专业的临床医学SAS数据集翻译专家。请将以下{source_lang}文本准确翻译为{target_lang}，保持医学术语的专业性和准确性。"
+        else:
+            system_prompt = f"请将以下{source_lang}文本翻译为{target_lang}，保持原意和专业性。"
+        
+        payload = {
+            'model': 'deepseek-chat',
+            'messages': [
+                {'role': 'system', 'content': system_prompt},
+                {'role': 'user', 'content': text}
+            ],
+            'temperature': 0.1,
+            'max_tokens': 2000
+        }
+        
+        # 重试机制
+        for attempt in range(self.max_retries):
+            try:
+                if attempt > 0:
+                    self.stats['retry_count'] += 1
+                    print(f"AI翻译重试 {attempt}/{self.max_retries}: {text[:50]}...")
+                
+                response = requests.post(self.base_url, headers=self.headers, json=payload, timeout=self.timeout)
+                response.raise_for_status()
+                
+                result = response.json()
+                translated_text = result['choices'][0]['message']['content'].strip()
+                
+                # 记录成功统计
+                elapsed_time = time.time() - start_time
+                self.stats['successful_requests'] += 1
+                self.stats['total_time'] += elapsed_time
+                
+                if attempt > 0:
+                    print(f"AI翻译重试成功: {text[:30]}... -> {translated_text[:30]}... (耗时: {elapsed_time:.2f}s)")
+                
+                return {
+                    'success': True,
+                    'translated_text': translated_text,
+                    'original_text': text,
+                    'source_lang': source_lang,
+                    'target_lang': target_lang,
+                    'elapsed_time': elapsed_time
+                }
+                
+            except requests.exceptions.Timeout:
+                error_msg = f'API请求超时 (尝试 {attempt + 1}/{self.max_retries})'
+                print(f"AI翻译超时: {error_msg} - 文本: {text[:50]}...")
+                if attempt == self.max_retries - 1:
+                    self.stats['failed_requests'] += 1
+                    elapsed_time = time.time() - start_time
+                    self.stats['total_time'] += elapsed_time
+                    return {
+                        'success': False,
+                        'error': error_msg,
+                        'original_text': text,
+                        'elapsed_time': elapsed_time
+                    }
+            except requests.exceptions.RequestException as e:
+                error_msg = f'API请求失败: {str(e)} (尝试 {attempt + 1}/{self.max_retries})'
+                print(f"AI翻译请求失败: {error_msg} - 文本: {text[:50]}...")
+                if attempt == self.max_retries - 1:
+                    self.stats['failed_requests'] += 1
+                    elapsed_time = time.time() - start_time
+                    self.stats['total_time'] += elapsed_time
+                    return {
+                        'success': False,
+                        'error': error_msg,
+                        'original_text': text,
+                        'elapsed_time': elapsed_time
+                    }
+            except Exception as e:
+                error_msg = f'翻译失败: {str(e)} (尝试 {attempt + 1}/{self.max_retries})'
+                print(f"AI翻译异常: {error_msg} - 文本: {text[:50]}...")
+                if attempt == self.max_retries - 1:
+                    self.stats['failed_requests'] += 1
+                    elapsed_time = time.time() - start_time
+                    self.stats['total_time'] += elapsed_time
+                    return {
+                        'success': False,
+                        'error': error_msg,
+                        'original_text': text,
+                        'elapsed_time': elapsed_time
+                    }
+            
+            # 重试前等待
+            if attempt < self.max_retries - 1:
+                wait_time = 2 ** attempt
+                print(f"AI翻译等待 {wait_time}s 后重试...")
+                time.sleep(wait_time)  # 指数退避
+    
+    def batch_translate(self, texts, source_lang='en', target_lang='zh', context='medical', batch_size=5):
+        """优化的批量翻译，支持真正的批量处理"""
+        if not texts:
+            return []
+        
+        results = []
+        
+        # 过滤空文本
+        valid_texts = [(i, text) for i, text in enumerate(texts) if text and text.strip()]
+        
+        if not valid_texts:
+            return [{
                 'success': True,
-                'translated_text': translated_text,
+                'translated_text': '',
                 'original_text': text,
                 'source_lang': source_lang,
                 'target_lang': target_lang
-            }
+            } for text in texts]
+        
+        # 分批处理
+        for batch_start in range(0, len(valid_texts), batch_size):
+            batch_end = min(batch_start + batch_size, len(valid_texts))
+            batch_items = valid_texts[batch_start:batch_end]
             
-        except requests.exceptions.RequestException as e:
-            return {
-                'success': False,
-                'error': f'API请求失败: {str(e)}',
-                'original_text': text
-            }
-        except Exception as e:
-            return {
-                'success': False,
-                'error': f'翻译失败: {str(e)}',
-                'original_text': text
-            }
-    
-    def batch_translate(self, texts, source_lang='en', target_lang='zh', context='medical'):
-        """批量翻译"""
-        results = []
-        for text in texts:
-            if text and text.strip():
-                result = self.translate_text(text, source_lang, target_lang, context)
-                results.append(result)
+            # 构建批量翻译请求
+            batch_text = '\n'.join([f'{i+1}. {text}' for i, (_, text) in enumerate(batch_items)])
+            
+            if context == 'medical':
+                system_prompt = f"你是一个专业的临床医学SAS数据集翻译专家。请将以下{source_lang}文本准确翻译为{target_lang}，保持医学术语的专业性和准确性。请按序号返回翻译结果，每行一个。"
             else:
-                results.append({
+                system_prompt = f"请将以下{source_lang}文本翻译为{target_lang}，保持原意和专业性。请按序号返回翻译结果，每行一个。"
+            
+            batch_result = self.translate_text(batch_text, source_lang, target_lang, context)
+            
+            if batch_result.get('success'):
+                translated_lines = batch_result.get('translated_text', '').strip().split('\n')
+                
+                for i, (original_index, original_text) in enumerate(batch_items):
+                    if i < len(translated_lines):
+                        # 提取翻译结果（去除序号）
+                        translated = translated_lines[i].strip()
+                        if '. ' in translated and translated.split('.')[0].isdigit():
+                            translated = translated.split('. ', 1)[1]
+                        
+                        results.append((original_index, {
+                            'success': True,
+                            'translated_text': translated,
+                            'original_text': original_text,
+                            'source_lang': source_lang,
+                            'target_lang': target_lang
+                        }))
+                    else:
+                        # 批量翻译结果不足，回退到单独翻译
+                        single_result = self.translate_text(original_text, source_lang, target_lang, context)
+                        results.append((original_index, single_result))
+            else:
+                # 批量翻译失败，回退到单独翻译
+                print(f"批量翻译失败，回退到单独翻译: {batch_result.get('error')}")
+                for original_index, original_text in batch_items:
+                    single_result = self.translate_text(original_text, source_lang, target_lang, context)
+                    results.append((original_index, single_result))
+        
+        # 重新排序结果
+        final_results = [None] * len(texts)
+        for original_index, result in results:
+            final_results[original_index] = result
+        
+        # 填充空文本的结果
+        for i, text in enumerate(texts):
+            if final_results[i] is None:
+                final_results[i] = {
                     'success': True,
                     'translated_text': '',
                     'original_text': text,
                     'source_lang': source_lang,
                     'target_lang': target_lang
-                })
-        return results
+                }
+        
+        return final_results
 
 # 创建翻译服务实例
 translation_service = DeepSeekTranslationService()
@@ -2575,21 +2989,40 @@ def translate_text():
     """文本翻译API"""
     try:
         data = request.get_json()
-        
-        text = data.get('text')
+        text = data.get('text', '')
         source_lang = data.get('source_lang', 'en')
         target_lang = data.get('target_lang', 'zh')
         context = data.get('context', 'medical')
         
         if not text:
-            return jsonify({'success': False, 'message': '缺少要翻译的文本'}), 400
+            return jsonify({
+                'success': False,
+                'error': '文本不能为空'
+            }), 400
         
         result = translation_service.translate_text(text, source_lang, target_lang, context)
-        
         return jsonify(result)
         
     except Exception as e:
-        return jsonify({'success': False, 'message': str(e)}), 500
+        return jsonify({
+            'success': False,
+            'error': f'翻译服务错误: {str(e)}'
+        }), 500
+
+@app.route('/api/translation_stats', methods=['GET'])
+def get_translation_stats():
+    """获取AI翻译统计信息"""
+    try:
+        stats = translation_service.get_stats()
+        return jsonify({
+            'success': True,
+            'stats': stats
+        })
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': f'获取统计信息失败: {str(e)}'
+        }), 500
 
 @app.route('/api/batch_translate', methods=['POST'])
 def batch_translate():

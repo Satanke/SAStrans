@@ -8,6 +8,13 @@ let currentConfig = null;
 let lastDataPath = '';
 let isMergeExecuted = false; // 跟踪合并执行状态
 
+// 存储从配置加载的版本信息
+let configVersions = {
+    meddra_version: null,
+    whodrug_version: null,
+    ig_version: null
+};
+
 // 虚拟滚动状态：按数据集维护偏移量与总行数
 const virtualState = {}; 
 
@@ -2731,7 +2738,7 @@ async function loadVersionOptions() {
             if (medDRAData.versions) {
                 console.log('填充MedDRA版本选择器...');
                 const filteredVersions = filterVersionsByLanguage(medDRAData.versions, translationDirection);
-                populateVersionSelectWithDefault(medDRAVersionSelect, filteredVersions);
+                populateVersionSelectWithDefault(medDRAVersionSelect, filteredVersions, configVersions.meddra_version);
             }
         }
         
@@ -2745,7 +2752,7 @@ async function loadVersionOptions() {
             if (whoDrugData.versions) {
                 console.log('填充WHODrug版本选择器...');
                 const filteredVersions = filterVersionsByLanguage(whoDrugData.versions, translationDirection);
-                populateVersionSelectWithDefault(whoDrugVersionSelect, filteredVersions);
+                populateVersionSelectWithDefault(whoDrugVersionSelect, filteredVersions, configVersions.whodrug_version);
             }
         }
     } catch (error) {
@@ -2772,31 +2779,9 @@ function getTranslationDirection() {
 
 // 根据翻译方向过滤版本选项
 function filterVersionsByLanguage(versions, translationDirection) {
-    if (!versions || !translationDirection) {
-        return versions;
-    }
-    
-    // 根据翻译方向确定需要的语言
-    let targetLanguage;
-    if (translationDirection === 'zh_to_en') {
-        // 中译英：需要English版本
-        targetLanguage = 'english';
-    } else if (translationDirection === 'en_to_zh') {
-        // 英译中：需要Chinese版本
-        targetLanguage = 'chinese';
-    } else {
-        // 未知方向，返回所有版本
-        return versions;
-    }
-    
-    // 过滤版本
-    return versions.filter(version => {
-        if (typeof version === 'object' && version.name) {
-            // 检查表名是否包含目标语言
-            return version.name.toLowerCase().includes(targetLanguage);
-        }
-        return true; // 如果无法判断，保留该版本
-    });
+    // MedDRA和WHODrug版本不需要根据语言过滤，直接返回所有版本
+    // 因为这些版本本身就包含中英文对照数据
+    return versions || [];
 }
 
 // 填充版本选择器（原版本，保持兼容性）
@@ -2826,7 +2811,7 @@ function populateVersionSelect(selectElement, versions) {
 }
 
 // 填充版本选择器并设置默认值
-function populateVersionSelectWithDefault(selectElement, versions) {
+function populateVersionSelectWithDefault(selectElement, versions, presetValue = null) {
     if (!selectElement || !versions) return;
     
     // 清空现有选项
@@ -2861,6 +2846,7 @@ function populateVersionSelectWithDefault(selectElement, versions) {
     });
     
     let latestVersion = null;
+    let presetVersionExists = false;
     
     // 添加版本选项
     sortedVersions.forEach((version, index) => {
@@ -2870,16 +2856,27 @@ function populateVersionSelectWithDefault(selectElement, versions) {
             option.value = version.version;
             option.textContent = `${version.version} (${version.record_count || 0}条记录)`;
             if (index === 0) latestVersion = version.version; // 第一个是最新版本
+            // 检查预设值是否存在
+            if (presetValue && version.version === presetValue) {
+                presetVersionExists = true;
+            }
         } else {
             option.value = version.value || version;
             option.textContent = version.text || version;
             if (index === 0) latestVersion = version.value || version;
+            // 检查预设值是否存在
+            if (presetValue && (version.value === presetValue || version === presetValue)) {
+                presetVersionExists = true;
+            }
         }
         selectElement.appendChild(option);
     });
     
-    // 自动选择最新版本
-    if (latestVersion && sortedVersions.length > 0) {
+    // 选择版本：优先使用预设值，其次使用最新版本
+    if (presetValue && presetVersionExists) {
+        selectElement.value = presetValue;
+        console.log(`使用配置中的版本: ${presetValue}`);
+    } else if (latestVersion && sortedVersions.length > 0) {
         selectElement.value = latestVersion;
         console.log(`自动选择最新版本: ${latestVersion}`);
     }
@@ -2953,12 +2950,106 @@ async function saveTranslationLibraryConfig() {
         console.error('保存翻译库配置失败:', error);
         showAlert('保存翻译库配置失败: ' + error.message, 'error');
     } finally {
-        hideLoadingOverlay();
+         hideLoadingOverlay();
+     }
+ }
+
+// 更新清单按钮状态
+function updateListButtonStates(activeList) {
+    // 使用更通用的方式查找按钮
+    const buttons = {
+        'coded': translationConfirmationElements.codedListBtn,
+        'uncoded': translationConfirmationElements.uncodedListBtn,
+        'dataset': translationConfirmationElements.datasetLabelBtn,
+        'variable': translationConfirmationElements.variableLabelBtn
+    };
+    
+    // 重置所有按钮状态
+    Object.values(buttons).forEach(btn => {
+        if (btn) {
+            btn.classList.remove('btn-primary');
+            btn.classList.add('btn-outline-primary');
+        }
+    });
+    
+    // 设置活动按钮状态
+    if (buttons[activeList]) {
+        buttons[activeList].classList.remove('btn-outline-primary');
+        buttons[activeList].classList.add('btn-primary');
     }
+}
+
+// 设置清单切换事件监听器
+function setupListSwitchListeners() {
+    const buttons = document.querySelectorAll('.translation-confirm-content button');
+    
+    buttons.forEach(button => {
+        const newButton = button.cloneNode(true);
+        button.parentNode.replaceChild(newButton, button);
+        
+        if (newButton.textContent.includes('编码清单')) {
+            newButton.onclick = () => switchToList('coded');
+        } else if (newButton.textContent.includes('非编码清单')) {
+            newButton.onclick = () => switchToList('uncoded');
+        } else if (newButton.textContent.includes('数据集Label')) {
+            newButton.onclick = () => switchToList('dataset');
+        } else if (newButton.textContent.includes('变量Label')) {
+            newButton.onclick = () => switchToList('variable');
+        }
+    });
+}
+
+// 切换到指定清单
+function switchToList(listType) {
+    if (!window.translationListsData) {
+        showAlert('请先生成清单数据', 'warning');
+        return;
+    }
+    
+    const data = window.translationListsData;
+    
+    switch (listType) {
+        case 'coded':
+            if (data.codedList) {
+                displayCodedListResults(data.codedList);
+                updateListButtonStates('coded');
+            }
+            break;
+        case 'uncoded':
+            if (data.uncodedList) {
+                displayUncodedListResults(data.uncodedList);
+                updateListButtonStates('uncoded');
+            }
+            break;
+        case 'dataset':
+            if (data.datasetLabel) {
+                displayDatasetLabelResults(data.datasetLabel);
+                updateListButtonStates('dataset');
+            }
+            break;
+        case 'variable':
+            if (data.variableLabel) {
+                displayVariableLabelResults(data.variableLabel);
+                updateListButtonStates('variable');
+            }
+            break;
+        default:
+            console.warn('未知的清单类型:', listType);
+    }
+}
+
+// 重置配置版本信息
+function resetConfigVersions() {
+    configVersions.meddra_version = null;
+    configVersions.whodrug_version = null;
+    configVersions.ig_version = null;
 }
 
 // 加载翻译库配置
 async function loadTranslationLibraryConfig() {
+    // 重置配置版本信息
+    resetConfigVersions();
+    
     // 优先使用当前输入框中的路径
     let currentPath = null;
     if (datasetPathInput && datasetPathInput.value.trim()) {
@@ -3011,6 +3102,11 @@ function populateTranslationLibraryForm(config) {
         updateUIForMode();
     }
     
+    // 保存版本信息到全局变量
+    configVersions.meddra_version = config.meddra_version || null;
+    configVersions.whodrug_version = config.whodrug_version || null;
+    configVersions.ig_version = config.ig_version || null;
+    
     if (medDRAVersionSelect && config.meddra_version) {
         medDRAVersionSelect.value = config.meddra_version;
     }
@@ -3060,6 +3156,9 @@ function initializeTranslationConfirmationPage() {
         showAlert('请先配置翻译库设置', 'warning');
         return;
     }
+    
+    // 初始化按钮事件绑定
+    initializeTranslationConfirmation();
     
     // 执行合并配置表的逻辑
     executeMergeProcess();
@@ -3126,9 +3225,9 @@ async function executeMergeProcess() {
         
         if (result.success) {
             console.log('合并配置表执行成功');
-            // 生成翻译表单
-            generateTranslationForms(result.data);
-            showAlert('合并配置表执行成功，翻译表单已生成', 'success');
+            // 合并后直接生成四个清单
+            await generateAllLists(translationConfig);
+            showAlert('合并配置表执行成功，四个清单已生成', 'success');
         } else {
             throw new Error(result.message || '合并配置表执行失败');
         }
@@ -3141,37 +3240,64 @@ async function executeMergeProcess() {
      }
  }
  
- // 生成翻译表单
- function generateTranslationForms(mergeData) {
-     console.log('开始生成翻译表单...', mergeData);
-     
-     try {
-         // 获取翻译库配置
-         const translationConfigStr = sessionStorage.getItem('translationLibraryConfig');
-         const translationConfig = JSON.parse(translationConfigStr);
-         
-         // 根据翻译方向和规则生成四个子页面表单
-         const translationDirection = translationConfig.translation_direction;
-         
-         // 生成编码列表表单
-         generateCodedListForm(mergeData, translationDirection);
-         
-         // 生成未编码列表表单
-         generateUncodedListForm(mergeData, translationDirection);
-         
-         // 生成数据集标签表单
-         generateDatasetLabelForm(mergeData, translationDirection);
-         
-         // 生成变量标签表单
-         generateVariableLabelForm(mergeData, translationDirection);
-         
-         console.log('翻译表单生成完成');
-         
-     } catch (error) {
-         console.error('生成翻译表单失败:', error);
-         showAlert('生成翻译表单失败: ' + error.message, 'error');
-     }
- }
+ // 生成所有四个清单
+async function generateAllLists(translationConfig) {
+    console.log('开始生成四个清单...');
+    
+    try {
+        // 存储四个清单的数据
+        const listsData = {
+            codedList: null,
+            uncodedList: null,
+            datasetLabel: null,
+            variableLabel: null
+        };
+        
+        showLoadingOverlay('正在生成编码清单...');
+        
+        // 1. 生成编码清单
+        const codedListData = await generateCodedListData(translationConfig);
+        listsData.codedList = codedListData;
+        
+        showLoadingOverlay('正在生成未编码清单...');
+        
+        // 2. 生成未编码清单
+        const uncodedListData = await generateUncodedListData(translationConfig);
+        listsData.uncodedList = uncodedListData;
+        
+        showLoadingOverlay('正在生成数据集标签...');
+        
+        // 3. 生成数据集标签
+        const datasetLabelData = await generateDatasetLabelData(translationConfig);
+        listsData.datasetLabel = datasetLabelData;
+        
+        showLoadingOverlay('正在生成变量标签...');
+        
+        // 4. 生成变量标签
+        const variableLabelData = await generateVariableLabelData(translationConfig);
+        listsData.variableLabel = variableLabelData;
+        
+        // 存储清单数据到全局变量
+        window.translationListsData = listsData;
+        
+        // 默认显示编码清单
+        displayCodedListResults(listsData.codedList);
+        
+        // 更新按钮状态
+        updateListButtonStates('coded');
+        
+        // 添加清单切换事件监听器
+        setupListSwitchListeners();
+        
+        console.log('四个清单生成完成');
+        
+    } catch (error) {
+        console.error('生成清单失败:', error);
+        showAlert('生成清单失败: ' + error.message, 'error');
+    } finally {
+        hideLoadingOverlay();
+    }
+}
 
 // 生成编码列表表单
 function generateCodedListForm(mergeData, translationDirection) {
@@ -3199,31 +3325,52 @@ function generateVariableLabelForm(mergeData, translationDirection) {
 }
  
  // 初始化翻译与确认页面（页面加载时调用）
+ // 防止重复绑定的标记
+ let translationConfirmationInitialized = false;
+ 
  function initializeTranslationConfirmation() {
-    // 绑定按钮事件
+    // 防止重复绑定事件
+    if (translationConfirmationInitialized) {
+        console.log('翻译确认页面已初始化，跳过重复绑定');
+        return;
+    }
+    
+    console.log('绑定翻译确认页面按钮事件...');
+    
+    // 绑定按钮事件 - 修改为切换显示缓存的数据
     if (translationConfirmationElements.codedListBtn) {
         translationConfirmationElements.codedListBtn.addEventListener('click', () => {
-            generateCodedList();
+            console.log('编码清单按钮被点击 - 切换显示');
+            switchToList('coded');
         });
+        console.log('编码清单按钮事件已绑定');
+    } else {
+        console.warn('未找到编码清单按钮元素');
     }
     
     if (translationConfirmationElements.uncodedListBtn) {
         translationConfirmationElements.uncodedListBtn.addEventListener('click', () => {
-            generateUncodedList();
+            console.log('非编码清单按钮被点击 - 切换显示');
+            switchToList('uncoded');
         });
     }
     
     if (translationConfirmationElements.datasetLabelBtn) {
         translationConfirmationElements.datasetLabelBtn.addEventListener('click', () => {
-            generateDatasetLabel();
+            console.log('数据集Label按钮被点击 - 切换显示');
+            switchToList('dataset');
         });
     }
     
     if (translationConfirmationElements.variableLabelBtn) {
         translationConfirmationElements.variableLabelBtn.addEventListener('click', () => {
-            generateVariableLabel();
+            console.log('变量Label按钮被点击 - 切换显示');
+            switchToList('variable');
         });
     }
+    
+    translationConfirmationInitialized = true;
+    console.log('翻译确认页面初始化完成');
 }
 
 // 执行合并配置（在生成子页面之前）
@@ -3297,44 +3444,86 @@ async function executeMergeConfigBeforeGeneration() {
 }
 
 // 生成编码清单
+// 生成编码列表数据（用于批量生成）
+async function generateCodedListData(translationConfig) {
+    console.log('开始生成编码列表数据...');
+    
+    // 添加项目路径参数
+    const requestData = {
+        ...translationConfig,
+        path: lastDataPath || sessionStorage.getItem('currentPath') || ''
+    };
+    
+    const response = await fetch('/api/generate_coded_list', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(requestData)
+    });
+    
+    const result = await response.json();
+    
+    if (result.success) {
+        console.log('编码列表数据生成成功:', result.data);
+        return result.data;
+    } else {
+        throw new Error(result.message || '编码列表生成失败');
+    }
+}
+
 async function generateCodedList() {
     try {
+        console.log('generateCodedList 函数被调用');
         showAlert('正在生成编码清单...', 'info');
         
         // 获取当前配置
         const config = getCurrentTranslationConfig();
+        console.log('获取到的配置:', config);
         if (!config) {
+            console.log('配置为空，显示警告');
             showAlert('请先完成翻译库版本控制配置', 'warning');
             return;
         }
         
-        // 添加项目路径参数
-        const requestData = {
-            ...config,
-            path: lastDataPath || sessionStorage.getItem('currentPath') || ''
-        };
+        // 使用新的数据生成函数
+        const data = await generateCodedListData(config);
+        showAlert('编码清单生成成功', 'success');
+        // 显示生成的清单数据
+        displayCodedListResults(data);
         
-        // 调用后端API生成编码清单
-        const response = await fetch('/api/generate_coded_list', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify(requestData)
-        });
-        
-        const result = await response.json();
-        
-        if (result.success) {
-            showAlert('编码清单生成成功', 'success');
-            // 显示生成的清单数据
-            displayCodedListResults(result.data);
-        } else {
-            showAlert(`编码清单生成失败: ${result.message}`, 'danger');
-        }
     } catch (error) {
         console.error('生成编码清单时出错:', error);
         showAlert('生成编码清单时出错', 'danger');
+    }
+}
+
+// 生成未编码列表数据（用于批量生成）
+async function generateUncodedListData(translationConfig, page = 1, pageSize = 100) {
+    console.log('开始生成未编码列表数据...');
+    
+    const requestData = {
+        ...translationConfig,
+        path: lastDataPath || sessionStorage.getItem('currentPath') || '',
+        page: page,
+        page_size: pageSize
+    };
+    
+    const response = await fetch('/api/generate_uncoded_list', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(requestData)
+    });
+    
+    const result = await response.json();
+    
+    if (result.success) {
+        console.log('未编码列表数据生成成功:', result.data);
+        return result.data;
+    } else {
+        throw new Error(result.message || '未编码列表生成失败');
     }
 }
 
@@ -3350,33 +3539,42 @@ async function generateUncodedList() {
             return;
         }
         
-        // 添加项目路径参数
-        const requestData = {
-            ...config,
-            path: lastDataPath || sessionStorage.getItem('currentPath') || ''
-        };
+        // 使用新的数据生成函数
+        const data = await generateUncodedListData(config);
+        showAlert('非编码清单生成成功', 'success');
+        // 显示生成的清单数据
+        displayUncodedListResults(data);
         
-        // 调用后端API生成非编码清单
-        const response = await fetch('/api/generate_uncoded_list', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify(requestData)
-        });
-        
-        const result = await response.json();
-        
-        if (result.success) {
-            showAlert('非编码清单生成成功', 'success');
-            // 显示生成的清单数据
-            displayUncodedListResults(result.data);
-        } else {
-            showAlert(`非编码清单生成失败: ${result.message}`, 'danger');
-        }
     } catch (error) {
         console.error('生成非编码清单时出错:', error);
         showAlert('生成非编码清单时出错', 'danger');
+    }
+}
+
+// 生成数据集标签数据（用于批量生成）
+async function generateDatasetLabelData(translationConfig) {
+    console.log('开始生成数据集标签数据...');
+    
+    const requestData = {
+        ...translationConfig,
+        path: lastDataPath || sessionStorage.getItem('currentPath') || ''
+    };
+    
+    const response = await fetch('/api/generate_dataset_label', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(requestData)
+    });
+    
+    const result = await response.json();
+    
+    if (result.success) {
+        console.log('数据集标签数据生成成功:', result.data);
+        return result.data;
+    } else {
+        throw new Error(result.message || '数据集标签生成失败');
     }
 }
 
@@ -3392,33 +3590,42 @@ async function generateDatasetLabel() {
             return;
         }
         
-        // 添加项目路径参数
-        const requestData = {
-            ...config,
-            path: lastDataPath || sessionStorage.getItem('currentPath') || ''
-        };
+        // 使用新的数据生成函数
+        const data = await generateDatasetLabelData(config);
+        showAlert('数据集Label生成成功', 'success');
+        // 显示生成的清单数据
+        displayDatasetLabelResults(data);
         
-        // 调用后端API生成数据集Label
-        const response = await fetch('/api/generate_dataset_label', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify(requestData)
-        });
-        
-        const result = await response.json();
-        
-        if (result.success) {
-            showAlert('数据集Label生成成功', 'success');
-            // 显示生成的清单数据
-            displayDatasetLabelResults(result.data);
-        } else {
-            showAlert(`数据集Label生成失败: ${result.message}`, 'danger');
-        }
     } catch (error) {
         console.error('生成数据集Label时出错:', error);
         showAlert('生成数据集Label时出错', 'danger');
+    }
+}
+
+// 生成变量标签数据（用于批量生成）
+async function generateVariableLabelData(translationConfig) {
+    console.log('开始生成变量标签数据...');
+    
+    const requestData = {
+        ...translationConfig,
+        path: lastDataPath || sessionStorage.getItem('currentPath') || ''
+    };
+    
+    const response = await fetch('/api/generate_variable_label', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(requestData)
+    });
+    
+    const result = await response.json();
+    
+    if (result.success) {
+        console.log('变量标签数据生成成功:', result.data);
+        return result.data;
+    } else {
+        throw new Error(result.message || '变量标签生成失败');
     }
 }
 
@@ -3434,30 +3641,12 @@ async function generateVariableLabel() {
             return;
         }
         
-        // 添加项目路径参数
-        const requestData = {
-            ...config,
-            path: lastDataPath || sessionStorage.getItem('currentPath') || ''
-        };
+        // 使用新的数据生成函数
+        const data = await generateVariableLabelData(config);
+        showAlert('变量Label生成成功', 'success');
+        // 显示生成的清单数据
+        displayVariableLabelResults(data);
         
-        // 调用后端API生成变量Label
-        const response = await fetch('/api/generate_variable_label', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify(requestData)
-        });
-        
-        const result = await response.json();
-        
-        if (result.success) {
-            showAlert('变量Label生成成功', 'success');
-            // 显示生成的清单数据
-            displayVariableLabelResults(result.data);
-        } else {
-            showAlert(`变量Label生成失败: ${result.message}`, 'danger');
-        }
     } catch (error) {
         console.error('生成变量Label时出错:', error);
         showAlert('生成变量Label时出错', 'danger');
@@ -3468,8 +3657,8 @@ async function generateVariableLabel() {
 function getCurrentTranslationConfig() {
     const translationDirection = document.getElementById('translationDirection')?.value;
     const translationMode = document.getElementById('translationMode')?.value;
-    const meddraVersion = document.getElementById('meddraVersion')?.value;
-    const whodrugVersion = document.getElementById('whodrugVersion')?.value;
+    const meddraVersion = document.getElementById('medDRAVersion')?.value;
+    const whodrugVersion = document.getElementById('whoDrugVersion')?.value;
     const igVersion = document.getElementById('igVersion')?.value;
     
     if (!translationDirection || !translationMode) {
@@ -4047,6 +4236,7 @@ function displayCodedListResults(data) {
                                 <th>数据集</th>
                                 <th>变量</th>
                                 <th>原始值</th>
+                                <th>Code</th>
                                 <th>翻译值</th>
                                 <th>翻译来源</th>
                                 <th>需要确认</th>
@@ -4065,6 +4255,7 @@ function displayCodedListResults(data) {
                 <td>${item.dataset}</td>
                 <td><code>${item.variable}</code></td>
                 <td>${item.value}</td>
+                <td><code>${item.code || ''}</code></td>
                 <td>
                     <input type="text" class="form-control form-control-sm" 
                            value="${item.translated_value || ''}" 
@@ -4101,6 +4292,108 @@ function displayCodedListResults(data) {
     container.innerHTML = html;
 }
 
+// 生成分页控件
+function generatePaginationControls(pagination, listType) {
+    if (!pagination || pagination.total_pages <= 1) {
+        return '';
+    }
+    
+    const currentPage = pagination.current_page;
+    const totalPages = pagination.total_pages;
+    const hasPrev = pagination.has_prev;
+    const hasNext = pagination.has_next;
+    
+    let paginationHtml = `
+        <div class="d-flex justify-content-between align-items-center mt-3">
+            <div>
+                <small class="text-muted">
+                    显示第 ${((currentPage - 1) * pagination.page_size) + 1} - ${Math.min(currentPage * pagination.page_size, pagination.total_count)} 项，
+                    共 ${pagination.total_count} 项
+                </small>
+            </div>
+            <nav>
+                <ul class="pagination pagination-sm mb-0">
+                    <li class="page-item ${!hasPrev ? 'disabled' : ''}">
+                        <button class="page-link" onclick="loadPage(${currentPage - 1}, '${listType}')" ${!hasPrev ? 'disabled' : ''}>
+                            上一页
+                        </button>
+                    </li>
+    `;
+    
+    // 生成页码按钮
+    const startPage = Math.max(1, currentPage - 2);
+    const endPage = Math.min(totalPages, currentPage + 2);
+    
+    if (startPage > 1) {
+        paginationHtml += `
+            <li class="page-item">
+                <button class="page-link" onclick="loadPage(1, '${listType}')">1</button>
+            </li>
+        `;
+        if (startPage > 2) {
+            paginationHtml += `<li class="page-item disabled"><span class="page-link">...</span></li>`;
+        }
+    }
+    
+    for (let i = startPage; i <= endPage; i++) {
+        paginationHtml += `
+            <li class="page-item ${i === currentPage ? 'active' : ''}">
+                <button class="page-link" onclick="loadPage(${i}, '${listType}')">${i}</button>
+            </li>
+        `;
+    }
+    
+    if (endPage < totalPages) {
+        if (endPage < totalPages - 1) {
+            paginationHtml += `<li class="page-item disabled"><span class="page-link">...</span></li>`;
+        }
+        paginationHtml += `
+            <li class="page-item">
+                <button class="page-link" onclick="loadPage(${totalPages}, '${listType}')">${totalPages}</button>
+            </li>
+        `;
+    }
+    
+    paginationHtml += `
+                    <li class="page-item ${!hasNext ? 'disabled' : ''}">
+                        <button class="page-link" onclick="loadPage(${currentPage + 1}, '${listType}')" ${!hasNext ? 'disabled' : ''}>
+                            下一页
+                        </button>
+                    </li>
+                </ul>
+            </nav>
+        </div>
+    `;
+    
+    return paginationHtml;
+}
+
+// 加载指定页面的数据
+async function loadPage(page, listType) {
+    if (listType === 'uncoded') {
+        try {
+            showAlert('正在加载第 ' + page + ' 页...', 'info');
+            
+            // 获取当前配置
+            const config = getCurrentTranslationConfig();
+            if (!config) {
+                showAlert('请先完成翻译库版本控制配置', 'warning');
+                return;
+            }
+            
+            // 加载指定页面的数据
+            const data = await generateUncodedListData(config, page, 100);
+            displayUncodedListResults(data);
+            
+            showAlert('第 ' + page + ' 页加载成功', 'success');
+            
+        } catch (error) {
+            console.error('加载页面失败:', error);
+            showAlert('加载页面失败: ' + error.message, 'error');
+        }
+    }
+}
+
 // 显示非编码清单结果
 function displayUncodedListResults(data) {
     console.log('显示非编码清单结果:', data);
@@ -4112,12 +4405,18 @@ function displayUncodedListResults(data) {
     }
     
     const uncodedItems = data.uncoded_items || [];
+    const pagination = data.pagination || {};
     
     let html = `
         <div class="card">
-            <div class="card-header">
-                <h5 class="mb-0">非编码清单 (${uncodedItems.length} 项)</h5>
-                <small class="text-muted">使用metadata和AI翻译</small>
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <div>
+                    <h5 class="mb-0">非编码清单</h5>
+                    <small class="text-muted">使用metadata和AI翻译 | 总计: ${pagination.total_count || 0} 项</small>
+                </div>
+                <div>
+                    <small class="text-muted">第 ${pagination.current_page || 1} 页，共 ${pagination.total_pages || 1} 页</small>
+                </div>
             </div>
             <div class="card-body">
                 <div class="table-responsive">
@@ -4139,9 +4438,19 @@ function displayUncodedListResults(data) {
     uncodedItems.forEach((item, index) => {
         const needsConfirmation = item.needs_confirmation === 'Y';
         const isAITranslation = item.translation_source === 'AI';
+        const isMetadataMultiple = item.translation_source === 'metadata_multiple';
+        const hasHighlight = item.highlight === true;
+        
+        // 确定行的样式类
+        let rowClass = '';
+        if (hasHighlight) {
+            rowClass = 'table-danger';  // 重复值用红色高亮
+        } else if (needsConfirmation) {
+            rowClass = 'table-warning';  // 需要确认用黄色
+        }
         
         html += `
-            <tr class="${needsConfirmation ? 'table-warning' : ''}">
+            <tr class="${rowClass}">
                 <td>${item.dataset}</td>
                 <td><code>${item.variable}</code></td>
                 <td>${item.value}</td>
@@ -4149,11 +4458,13 @@ function displayUncodedListResults(data) {
                     <input type="text" class="form-control form-control-sm" 
                            value="${item.translated_value || ''}" 
                            data-index="${index}" 
-                           ${isAITranslation ? 'style="border-color: #28a745;"' : ''}>
+                           ${isAITranslation ? 'style="border-color: #28a745;"' : ''}
+                           ${hasHighlight ? 'style="border-color: #dc3545; background-color: #f8d7da;"' : ''}>
+                    ${hasHighlight ? '<small class="text-danger">检测到重复翻译值</small>' : ''}
                 </td>
                 <td>
-                    <span class="badge ${isAITranslation ? 'bg-success' : 'bg-info'}">
-                        ${item.translation_source}
+                    <span class="badge ${isAITranslation ? 'bg-success' : isMetadataMultiple ? 'bg-warning' : 'bg-info'}">
+                        ${item.translation_source === 'metadata_multiple' ? 'Metadata(多个)' : item.translation_source}
                     </span>
                 </td>
                 <td>
