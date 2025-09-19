@@ -251,8 +251,8 @@ function initializeStepIndicatorClicks() {
     
     if (step6) {
         step6.addEventListener('click', () => {
-            if (!document.getElementById('translation-confirmation-tab').disabled) {
-                switchToTab('translation-confirmation-tab');
+            if (!document.getElementById('translation-preview-tab').disabled) {
+                switchToTab('translation-preview-tab');
             }
         });
     }
@@ -264,7 +264,8 @@ function initializeTabNavigation() {
     disableTab('merge-config-tab');
 
     disableTab('translation-library-tab');
-    disableTab('translation-confirmation-tab');
+    disableTab('translation-preview-tab');
+    disableTab('ai-translation-tab');
     
     // 监听标签页切换事件以更新步骤指示器
     document.getElementById('setup-tab').addEventListener('shown.bs.tab', () => updateStepIndicator(1));
@@ -275,11 +276,105 @@ function initializeTabNavigation() {
     });
     
     document.getElementById('translation-library-tab').addEventListener('shown.bs.tab', () => updateStepIndicator(4));
-document.getElementById('translation-confirmation-tab').addEventListener('shown.bs.tab', () => {
-    updateStepIndicator(5);
-    initializeTranslationConfirmationPage();
-});
+    
+    // 翻译清单预览标签页事件监听器
+    const translationPreviewTab = document.getElementById('translation-preview-tab');
+    if (translationPreviewTab) {
+        translationPreviewTab.addEventListener('shown.bs.tab', async () => {
+            console.log('翻译预览标签页被激活');
+            updateStepIndicator(5);
+            // 初始化翻译清单预览页面的功能
+            try {
+                console.log('开始调用 initializeTranslationPreviewPageWithData');
+                await initializeTranslationPreviewPageWithData();
+                console.log('initializeTranslationPreviewPageWithData 调用完成');
+            } catch (error) {
+                console.error('初始化翻译预览页面失败:', error);
+            }
+        });
+    }
+    
+    // AI翻译标签页事件监听器
+    const aiTranslationTab = document.getElementById('ai-translation-tab');
+    if (aiTranslationTab) {
+        aiTranslationTab.addEventListener('shown.bs.tab', () => {
+            updateStepIndicator(6);
+            // 初始化AI翻译页面的功能
+            initializeAITranslationPage();
+        });
+    }
 }
+
+// 初始化翻译清单预览页面
+function initializeTranslationPreviewPage() {
+    console.log('初始化翻译清单预览页面');
+    
+    // 绑定预览按钮事件 - 使用正确的函数
+    $('#previewCodedListBtn').off('click').on('click', function() {
+        switchToPreviewList('coded');
+    });
+    
+    $('#previewUncodedListBtn').off('click').on('click', function() {
+        switchToPreviewList('uncoded');
+    });
+    
+    $('#previewDatasetLabelBtn').off('click').on('click', function() {
+        switchToPreviewList('dataset');
+    });
+    
+    $('#previewVariableLabelBtn').off('click').on('click', function() {
+        switchToPreviewList('variable');
+    });
+}
+
+// 切换翻译清单预览显示
+function switchToTranslationPreviewList(listType) {
+    console.log('切换到翻译清单预览:', listType);
+    
+    // 更新按钮状态
+    $('#previewCodedListBtn, #previewUncodedListBtn, #previewDatasetLabelBtn, #previewVariableLabelBtn')
+        .removeClass('btn-primary').addClass('btn-outline-primary');
+    
+    switch(listType) {
+        case 'coded':
+            $('#previewCodedListBtn').removeClass('btn-outline-primary').addClass('btn-primary');
+            break;
+        case 'uncoded':
+            $('#previewUncodedListBtn').removeClass('btn-outline-primary').addClass('btn-primary');
+            break;
+        case 'dataset_label':
+            $('#previewDatasetLabelBtn').removeClass('btn-outline-primary').addClass('btn-primary');
+            break;
+        case 'variable_label':
+            $('#previewVariableLabelBtn').removeClass('btn-outline-primary').addClass('btn-primary');
+            break;
+    }
+    
+    // 检查是否有翻译清单数据
+    if (!window.translationListsData) {
+        $('#previewTranslationContentArea').html(`
+            <div class="alert alert-warning">
+                <i class="fas fa-exclamation-triangle me-2"></i>
+                <strong>提示：</strong>请先在"翻译库版本控制"页面生成翻译清单数据。
+            </div>
+        `);
+        return;
+    }
+    
+    // 显示对应的翻译清单
+    displayTranslationList(window.translationListsData, listType, '#previewTranslationContentArea');
+}
+    
+    // 保留翻译与确认标签页的兼容性（如果存在）
+    const translationConfirmationTab = document.getElementById('translation-confirmation-tab');
+    if (translationConfirmationTab) {
+        translationConfirmationTab.addEventListener('shown.bs.tab', () => {
+            updateStepIndicator(7);
+            // 初始化翻译确认页面的功能
+            initializeTranslationPreview();
+            initializeAITranslation();
+        });
+    }
 
 function switchToTab(tabId) {
     const targetTab = document.getElementById(tabId);
@@ -389,7 +484,7 @@ async function readDatasets() {
         return;
     }
 
-    showLoadingOverlay('正在读取数据集...', '请稍候，这可能需要一些时间');
+    showLoadingOverlay('正在读取数据集...', '初始化读取进程', 0);
     readButton.disabled = true;
 
     try {
@@ -406,6 +501,11 @@ async function readDatasets() {
         });
 
         const result = await response.json();
+        
+        // 如果有task_id，开始轮询真实进度
+        if (result.task_id) {
+            await pollProgress(result.task_id);
+        }
         
         if (result.success) {
             currentDatasets = result.datasets;
@@ -444,6 +544,9 @@ async function readDatasets() {
 }
 
 function displayDatasets() {
+    console.log('displayDatasets called, currentDatasets:', currentDatasets);
+    console.log('datasetList element:', datasetList);
+    
     if (Object.keys(currentDatasets).length === 0) {
         showAlert('未找到数据集', 'warning');
         return;
@@ -461,12 +564,18 @@ function displayDatasets() {
 
     // 清空现有列表
     if (datasetList) {
+        console.log('Clearing datasetList and creating items...');
         datasetList.innerHTML = '';
         
         // 创建数据集列表项
-    Object.keys(currentDatasets).forEach((datasetName, index) => {
+        Object.keys(currentDatasets).forEach((datasetName, index) => {
+            console.log(`Creating item for dataset: ${datasetName}, index: ${index}`);
             createDatasetListItem(datasetName, index === 0);
-    });
+        });
+        
+        console.log('Final datasetList innerHTML:', datasetList.innerHTML);
+    } else {
+        console.error('datasetList element not found!');
     }
 
     // 填充合并配置的数据集选项
@@ -479,6 +588,8 @@ function displayDatasets() {
 }
 
 function createDatasetListItem(datasetName, isFirstItem) {
+    console.log(`createDatasetListItem called for: ${datasetName}, isFirstItem: ${isFirstItem}`);
+    
     const listItem = document.createElement('div');
     listItem.className = `dataset-list-item ${isFirstItem ? 'active' : ''}`;
     listItem.setAttribute('data-dataset', datasetName);
@@ -488,12 +599,16 @@ function createDatasetListItem(datasetName, isFirstItem) {
         <div class="dataset-badge">${currentDatasets[datasetName].rows.toLocaleString()}</div>
     `;
     
+    console.log('Created listItem:', listItem);
+    
     // 添加点击事件
     listItem.addEventListener('click', () => {
         selectDataset(datasetName);
     });
     
+    console.log('About to append to datasetList:', datasetList);
     datasetList.appendChild(listItem);
+    console.log('Item appended successfully');
     
     // 如果是第一个项目，自动加载预览
     if (isFirstItem) {
@@ -2296,10 +2411,42 @@ async function saveMergeConfig() {
 
 
 
-function showLoadingOverlay(mainText, subText) {
+function showLoadingOverlay(mainText, subText, progress = 0) {
     loadingText.textContent = mainText;
     loadingSubtext.textContent = subText;
+    
+    // 更新进度条
+    const progressBar = document.getElementById('loadingProgressBar');
+    const progressText = document.getElementById('loadingProgressText');
+    const progressStatus = document.getElementById('loadingProgressStatus');
+    
+    if (progressBar) {
+        progressBar.style.width = progress + '%';
+    }
+    if (progressText) {
+        progressText.textContent = Math.round(progress) + '%';
+    }
+    if (progressStatus) {
+        progressStatus.textContent = subText || '处理中...';
+    }
+    
     loadingOverlay.classList.remove('d-none');
+}
+
+function updateLoadingProgress(progress, status) {
+    const progressBar = document.getElementById('loadingProgressBar');
+    const progressText = document.getElementById('loadingProgressText');
+    const progressStatus = document.getElementById('loadingProgressStatus');
+    
+    if (progressBar) {
+        progressBar.style.width = progress + '%';
+    }
+    if (progressText) {
+        progressText.textContent = Math.round(progress) + '%';
+    }
+    if (progressStatus) {
+        progressStatus.textContent = status || '处理中...';
+    }
 }
 
 function hideLoadingOverlay() {
@@ -2634,9 +2781,9 @@ function initializeTranslationLibrary() {
         console.log('显示WHODrug空行');
     }
     
-    // 加载版本选项
+    // 加载版本选项（只在首次加载时调用）
     loadVersionOptions();
-    
+
     // 加载可用变量
     loadAvailableVariables();
 }
@@ -2660,6 +2807,11 @@ function onTranslationDirectionChange() {
     
     // 根据翻译方向调整界面
     updateTranslationModeOptions(direction);
+    
+    // 翻译方向改变时，重新填充版本选择器（使用缓存数据）
+    if (versionOptionsCache.meddra || versionOptionsCache.whodrug) {
+        populateVersionSelectorsFromCache();
+    }
 }
 
 // 翻译模式改变事件
@@ -2717,9 +2869,52 @@ function showAllVersionSelects() {
     if (igGroup) igGroup.style.display = 'block';
 }
 
-// 加载版本选项
-async function loadVersionOptions() {
-    console.log('开始加载版本选项...');
+// 版本选择器缓存和状态管理
+let versionOptionsCache = {
+    meddra: null,
+    whodrug: null,
+    lastLoadTime: null,
+    isLoading: false
+};
+
+// 缓存有效期（5分钟）
+const VERSION_CACHE_DURATION = 5 * 60 * 1000;
+
+// 检查缓存是否有效
+function isVersionCacheValid() {
+    if (!versionOptionsCache.lastLoadTime) return false;
+    return (Date.now() - versionOptionsCache.lastLoadTime) < VERSION_CACHE_DURATION;
+}
+
+// 清除版本选择器缓存
+function clearVersionCache() {
+    versionOptionsCache = {
+        meddra: null,
+        whodrug: null,
+        lastLoadTime: null,
+        isLoading: false
+    };
+}
+
+// 加载版本选项（优化版本，支持缓存）
+async function loadVersionOptions(forceReload = false) {
+    console.log('开始加载版本选项...', { forceReload, isLoading: versionOptionsCache.isLoading });
+    
+    // 如果正在加载，避免重复请求
+    if (versionOptionsCache.isLoading) {
+        console.log('版本选项正在加载中，跳过重复请求');
+        return;
+    }
+    
+    // 如果缓存有效且不强制重新加载，使用缓存
+    if (!forceReload && isVersionCacheValid() && versionOptionsCache.meddra && versionOptionsCache.whodrug) {
+        console.log('使用缓存的版本选项');
+        populateVersionSelectorsFromCache();
+        return;
+    }
+    
+    versionOptionsCache.isLoading = true;
+    
     console.log('medDRAVersionSelect:', medDRAVersionSelect);
     console.log('whoDrugVersionSelect:', whoDrugVersionSelect);
     
@@ -2728,36 +2923,58 @@ async function loadVersionOptions() {
     console.log('当前翻译方向:', translationDirection);
     
     try {
-        // 加载MedDRA版本
-        console.log('正在获取MedDRA版本...');
-        const medDRAResponse = await fetch('/api/get_meddra_versions');
-        console.log('MedDRA API响应状态:', medDRAResponse.status);
+        // 并行加载MedDRA和WHODrug版本
+        const [medDRAResponse, whoDrugResponse] = await Promise.all([
+            fetch('/api/get_meddra_versions'),
+            fetch('/api/get_whodrug_versions')
+        ]);
+        
+        // 处理MedDRA版本
         if (medDRAResponse.ok) {
             const medDRAData = await medDRAResponse.json();
             console.log('MedDRA版本数据:', medDRAData);
             if (medDRAData.versions) {
-                console.log('填充MedDRA版本选择器...');
+                versionOptionsCache.meddra = medDRAData.versions;
                 const filteredVersions = filterVersionsByLanguage(medDRAData.versions, translationDirection);
                 populateVersionSelectWithDefault(medDRAVersionSelect, filteredVersions, configVersions.meddra_version);
             }
         }
         
-        // 加载WHODrug版本
-        console.log('正在获取WHODrug版本...');
-        const whoDrugResponse = await fetch('/api/get_whodrug_versions');
-        console.log('WHODrug API响应状态:', whoDrugResponse.status);
+        // 处理WHODrug版本
         if (whoDrugResponse.ok) {
             const whoDrugData = await whoDrugResponse.json();
             console.log('WHODrug版本数据:', whoDrugData);
             if (whoDrugData.versions) {
-                console.log('填充WHODrug版本选择器...');
+                versionOptionsCache.whodrug = whoDrugData.versions;
                 const filteredVersions = filterVersionsByLanguage(whoDrugData.versions, translationDirection);
                 populateVersionSelectWithDefault(whoDrugVersionSelect, filteredVersions, configVersions.whodrug_version);
             }
         }
+        
+        // 更新缓存时间
+        versionOptionsCache.lastLoadTime = Date.now();
+        console.log('版本选项加载完成，缓存已更新');
+        
     } catch (error) {
         console.error('加载版本选项失败:', error);
         showAlert('加载版本选项失败', 'error');
+    } finally {
+        versionOptionsCache.isLoading = false;
+    }
+}
+
+// 从缓存填充版本选择器
+function populateVersionSelectorsFromCache() {
+    const translationDirection = getTranslationDirection();
+    
+    if (versionOptionsCache.meddra && medDRAVersionSelect) {
+        const filteredVersions = filterVersionsByLanguage(versionOptionsCache.meddra, translationDirection);
+        populateVersionSelectWithDefault(medDRAVersionSelect, filteredVersions, configVersions.meddra_version);
+    }
+    
+    if (versionOptionsCache.whodrug && whoDrugVersionSelect) {
+        const filteredVersions = filterVersionsByLanguage(versionOptionsCache.whodrug, translationDirection);
+        populateVersionSelectWithDefault(whoDrugVersionSelect, filteredVersions, configVersions.whodrug_version);
     }
 }
 
@@ -2813,6 +3030,17 @@ function populateVersionSelect(selectElement, versions) {
 // 填充版本选择器并设置默认值
 function populateVersionSelectWithDefault(selectElement, versions, presetValue = null) {
     if (!selectElement || !versions) return;
+    
+    // 检查是否需要重新填充（避免不必要的DOM操作）
+    const currentOptionsCount = selectElement.options.length;
+    const expectedOptionsCount = versions.length + 1; // +1 for default option
+    
+    // 如果选项数量相同且当前值正确，跳过重新填充
+    if (currentOptionsCount === expectedOptionsCount && 
+        (!presetValue || selectElement.value === presetValue)) {
+        console.log('版本选择器已是最新状态，跳过重新填充');
+        return;
+    }
     
     // 清空现有选项
     selectElement.innerHTML = '';
@@ -2933,14 +3161,14 @@ async function saveTranslationLibraryConfig() {
             // 保存到sessionStorage供后续页面使用
             sessionStorage.setItem('translationLibraryConfig', JSON.stringify(config));
             
-            // 启用翻译与确认标签页
-            enableTranslationConfirmationTab();
+            // 启用翻译清单预览标签页
+            enableTranslationPreviewTab();
             
-            // 自动跳转到翻译与确认页面
+            // 自动跳转到翻译清单预览页面
             setTimeout(() => {
-                const translationConfirmationTab = document.getElementById('translation-confirmation-tab');
-                if (translationConfirmationTab) {
-                    translationConfirmationTab.click();
+                const translationPreviewTab = document.getElementById('translation-preview-tab');
+                if (translationPreviewTab) {
+                    translationPreviewTab.click();
                 }
             }, 1000);
         } else {
@@ -2955,8 +3183,56 @@ async function saveTranslationLibraryConfig() {
  }
 
 // 更新清单按钮状态
+// 更新预览按钮状态
+function updatePreviewListButtonStates(activeList) {
+    const buttons = {
+        'coded': translationPreviewElements.previewCodedListBtn,
+        'uncoded': translationPreviewElements.previewUncodedListBtn,
+        'dataset': translationPreviewElements.previewDatasetLabelBtn,
+        'variable': translationPreviewElements.previewVariableLabelBtn
+    };
+    
+    // 重置所有按钮状态
+    Object.values(buttons).forEach(btn => {
+        if (btn) {
+            btn.classList.remove('btn-primary');
+            btn.classList.add('btn-outline-primary');
+        }
+    });
+    
+    // 设置活动按钮状态
+    if (buttons[activeList]) {
+        buttons[activeList].classList.remove('btn-outline-primary');
+        buttons[activeList].classList.add('btn-primary');
+    }
+}
+
+// 更新AI翻译按钮状态
+function updateAITranslationListButtonStates(activeList) {
+    const buttons = {
+        'coded': aiTranslationElements.aiCodedListBtn,
+        'uncoded': aiTranslationElements.aiUncodedListBtn,
+        'dataset': aiTranslationElements.aiDatasetLabelBtn,
+        'variable': aiTranslationElements.aiVariableLabelBtn
+    };
+    
+    // 重置所有按钮状态
+    Object.values(buttons).forEach(btn => {
+        if (btn) {
+            btn.classList.remove('btn-success');
+            btn.classList.add('btn-outline-success');
+        }
+    });
+    
+    // 设置活动按钮状态
+    if (buttons[activeList]) {
+        buttons[activeList].classList.remove('btn-outline-success');
+        buttons[activeList].classList.add('btn-success');
+    }
+}
+
+// 更新清单按钮状态（保留原有功能）
 function updateListButtonStates(activeList) {
-    // 使用更通用的方式查找按钮
     const buttons = {
         'coded': translationConfirmationElements.codedListBtn,
         'uncoded': translationConfirmationElements.uncodedListBtn,
@@ -2999,8 +3275,96 @@ function setupListSwitchListeners() {
     });
 }
 
-// 切换到指定清单
-function switchToList(listType) {
+// 切换到指定预览清单（仅显示数据库匹配的结果）
+function switchToPreviewList(listType) {
+    console.log('switchToPreviewList called with listType:', listType);
+    console.log('window.translationPreviewListsData:', window.translationPreviewListsData);
+    
+    if (!window.translationPreviewListsData) {
+        console.error('translationPreviewListsData not found');
+        showAlert('请先生成预览清单数据', 'warning');
+        return;
+    }
+    
+    const data = window.translationPreviewListsData;
+    console.log('Using data:', data);
+    console.log('Data keys:', Object.keys(data));
+    
+    // 确保设置全局配置信息，用于分页功能
+    if (!currentPreviewConfig) {
+        // 尝试从各种数据源获取配置信息
+        let configSource = null;
+        if (data.codedList && data.codedList.translation_direction && data.codedList.path) {
+            configSource = data.codedList;
+        } else if (data.uncodedList && data.uncodedList.translation_direction && data.uncodedList.path) {
+            configSource = data.uncodedList;
+        } else if (data.datasetLabel && data.datasetLabel.translation_direction && data.datasetLabel.path) {
+            configSource = data.datasetLabel;
+        } else if (data.variableLabel && data.variableLabel.translation_direction && data.variableLabel.path) {
+            configSource = data.variableLabel;
+        }
+        
+        if (configSource) {
+            currentPreviewConfig = {
+                translation_direction: configSource.translation_direction,
+                path: configSource.path
+            };
+            console.log('设置 currentPreviewConfig 从数据源:', currentPreviewConfig);
+        }
+    }
+    
+    switch (listType) {
+        case 'coded':
+            console.log('Processing coded list, data.coded_items:', data.coded_items);
+            console.log('Processing coded list, data.codedList:', data.codedList);
+            if (data.codedList) {
+                displayPreviewCodedListResults(data.codedList);
+            } else {
+                console.error('编码清单数据不存在');
+                showAlert('编码清单数据不存在，请重新生成预览数据', 'warning');
+            }
+            updatePreviewListButtonStates('coded');
+            break;
+        case 'uncoded':
+            console.log('Processing uncoded list, data.uncoded_items:', data.uncoded_items);
+            console.log('Processing uncoded list, data.uncodedList:', data.uncodedList);
+            if (data.uncodedList) {
+                displayPreviewUncodedListResults(data.uncodedList);
+            } else {
+                console.error('非编码清单数据不存在');
+                showAlert('非编码清单数据不存在，请重新生成预览数据', 'warning');
+            }
+            updatePreviewListButtonStates('uncoded');
+            break;
+        case 'dataset':
+            console.log('Processing dataset list, data.data:', data.data);
+            console.log('Processing dataset list, data.datasetLabel:', data.datasetLabel);
+            if (data.datasetLabel) {
+                displayPreviewDatasetLabelResults(data.datasetLabel);
+            } else {
+                console.error('数据集标签数据不存在');
+                showAlert('数据集标签数据不存在，请重新生成预览数据', 'warning');
+            }
+            updatePreviewListButtonStates('dataset');
+            break;
+        case 'variable':
+            console.log('Processing variable list, data.data:', data.data);
+            console.log('Processing variable list, data.variableLabel:', data.variableLabel);
+            if (data.variableLabel) {
+                displayPreviewVariableLabelResults(data.variableLabel);
+            } else {
+                console.error('变量标签数据不存在');
+                showAlert('变量标签数据不存在，请重新生成预览数据', 'warning');
+            }
+            updatePreviewListButtonStates('variable');
+            break;
+        default:
+            console.warn('未知的预览清单类型:', listType);
+    }
+}
+
+// 切换到指定AI翻译清单（包含AI翻译功能）
+function switchToAITranslationList(listType) {
     if (!window.translationListsData) {
         showAlert('请先生成清单数据', 'warning');
         return;
@@ -3011,30 +3375,30 @@ function switchToList(listType) {
     switch (listType) {
         case 'coded':
             if (data.codedList) {
-                displayCodedListResults(data.codedList);
-                updateListButtonStates('coded');
+                displayAITranslationCodedListResults(data.codedList);
+                updateAITranslationListButtonStates('coded');
             }
             break;
         case 'uncoded':
             if (data.uncodedList) {
-                displayUncodedListResults(data.uncodedList);
-                updateListButtonStates('uncoded');
+                displayAITranslationUncodedListResults(data.uncodedList);
+                updateAITranslationListButtonStates('uncoded');
             }
             break;
         case 'dataset':
             if (data.datasetLabel) {
-                displayDatasetLabelResults(data.datasetLabel);
-                updateListButtonStates('dataset');
+                displayAITranslationDatasetLabelResults(data.datasetLabel);
+                updateAITranslationListButtonStates('dataset');
             }
             break;
         case 'variable':
             if (data.variableLabel) {
-                displayVariableLabelResults(data.variableLabel);
-                updateListButtonStates('variable');
+                displayAITranslationVariableLabelResults(data.variableLabel);
+                updateAITranslationListButtonStates('variable');
             }
             break;
         default:
-            console.warn('未知的清单类型:', listType);
+            console.warn('未知的AI翻译清单类型:', listType);
     }
 }
 
@@ -3138,17 +3502,91 @@ function enableTranslationConfirmationTab() {
     }
 }
 
+// 启用翻译清单预览标签页
+function enableTranslationPreviewTab() {
+    const translationPreviewTab = document.getElementById('translation-preview-tab');
+    if (translationPreviewTab) {
+        translationPreviewTab.disabled = false;
+        translationPreviewTab.classList.remove('disabled');
+    }
+    
+    // 同时启用AI翻译标签页
+    const aiTranslationTab = document.getElementById('ai-translation-tab');
+    if (aiTranslationTab) {
+        aiTranslationTab.disabled = false;
+        aiTranslationTab.classList.remove('disabled');
+    }
+}
+
 // 翻译与确认页面相关功能
-const translationConfirmationElements = {
+// 翻译清单预览页面元素
+const translationPreviewElements = {
+    previewCodedListBtn: document.getElementById('previewCodedListBtn'),
+    previewUncodedListBtn: document.getElementById('previewUncodedListBtn'),
+    previewDatasetLabelBtn: document.getElementById('previewDatasetLabelBtn'),
+    previewVariableLabelBtn: document.getElementById('previewVariableLabelBtn')
+};
+
+// AI翻译页面元素
+// 翻译预览页面元素定义
+const previewTranslationElements = {
     codedListBtn: document.getElementById('codedListBtn'),
     uncodedListBtn: document.getElementById('uncodedListBtn'),
     datasetLabelBtn: document.getElementById('datasetLabelBtn'),
     variableLabelBtn: document.getElementById('variableLabelBtn')
 };
 
-// 初始化翻译与确认页面（页面切换时调用）
-function initializeTranslationConfirmationPage() {
-    console.log('初始化翻译与确认页面...');
+const aiTranslationElements = {
+    aiCodedListBtn: document.getElementById('aiCodedListBtn'),
+    aiUncodedListBtn: document.getElementById('aiUncodedListBtn'),
+    aiDatasetLabelBtn: document.getElementById('aiDatasetLabelBtn'),
+    aiVariableLabelBtn: document.getElementById('aiVariableLabelBtn')
+};
+
+// 翻译确认页面元素（兼容性定义，指向预览页面元素）
+const translationConfirmationElements = {
+    codedListBtn: document.getElementById('previewCodedListBtn'),
+    uncodedListBtn: document.getElementById('previewUncodedListBtn'),
+    datasetLabelBtn: document.getElementById('previewDatasetLabelBtn'),
+    variableLabelBtn: document.getElementById('previewVariableLabelBtn')
+};
+
+// 初始化翻译清单预览页面（页面切换时调用）
+async function initializeTranslationPreviewPageWithData() {
+    console.log('初始化翻译清单预览页面...');
+    
+    // 检查是否有翻译库配置
+    const translationConfig = sessionStorage.getItem('translationLibraryConfig');
+    if (!translationConfig) {
+        console.log('未找到翻译库配置');
+        showAlert('请先配置翻译库设置', 'warning');
+        return;
+    }
+    
+    console.log('翻译库配置存在，开始初始化按钮事件');
+    // 初始化按钮事件绑定
+    initializeTranslationPreview();
+    
+    console.log('开始执行合并配置表逻辑');
+    // 执行合并配置表的逻辑（仅数据库匹配预览版本）
+    try {
+        await executeMergeProcessPreview();
+        console.log('executeMergeProcessPreview 执行完成');
+        
+        // 检查数据是否已生成
+        if (window.translationPreviewListsData) {
+            console.log('预览数据已生成:', Object.keys(window.translationPreviewListsData));
+        } else {
+            console.warn('预览数据未生成');
+        }
+    } catch (error) {
+        console.error('executeMergeProcessPreview 执行失败:', error);
+    }
+}
+
+// 初始化AI翻译页面（页面切换时调用）
+function initializeAITranslationPage() {
+    console.log('初始化AI翻译页面...');
     
     // 检查是否有翻译库配置
     const translationConfig = sessionStorage.getItem('translationLibraryConfig');
@@ -3158,13 +3596,185 @@ function initializeTranslationConfirmationPage() {
     }
     
     // 初始化按钮事件绑定
-    initializeTranslationConfirmation();
+    initializeAITranslation();
     
-    // 执行合并配置表的逻辑
-    executeMergeProcess();
+    // 添加生成AI翻译清单的按钮事件
+    const generateAIListBtn = document.getElementById('generate-ai-translation-list-btn');
+    if (generateAIListBtn) {
+        generateAIListBtn.addEventListener('click', async () => {
+            try {
+                await executeMergeProcess(); // 执行完整的合并配置过程，包含AI翻译
+            } catch (error) {
+                console.error('生成AI翻译清单失败:', error);
+                showAlert('生成AI翻译清单失败: ' + error.message, 'danger');
+            }
+        });
+    }
+    
+    console.log('AI翻译页面初始化完成');
 }
 
 // 执行合并配置表的逻辑
+// 执行合并配置表逻辑（预览版本，仅数据库匹配）
+async function executeMergeProcessPreview() {
+    try {
+        console.log('开始执行合并配置表逻辑（预览版本）...');
+        
+        // 获取翻译库配置
+        const translationConfigStr = sessionStorage.getItem('translationLibraryConfig');
+        if (!translationConfigStr) {
+            throw new Error('未找到翻译库配置');
+        }
+        
+        const translationConfig = JSON.parse(translationConfigStr);
+        
+        // 获取合并配置 - 优先从sessionStorage获取，如果没有则从数据库加载
+        let mergeConfig = null;
+        const mergeConfigStr = sessionStorage.getItem('mergeConfig');
+        
+        if (mergeConfigStr) {
+            mergeConfig = JSON.parse(mergeConfigStr);
+        } else {
+            // 从数据库加载合并配置
+            console.log('从sessionStorage未找到合并配置，尝试从数据库加载...');
+            const currentPath = translationConfig.path || document.getElementById('datasetPath').value;
+            if (currentPath) {
+                try {
+                    const response = await fetch(`/api/load_merge_config?path=${encodeURIComponent(currentPath)}`);
+                    if (response.ok) {
+                        const result = await response.json();
+                        if (result.success && result.config && result.config.configs) {
+                            mergeConfig = result.config.configs;
+                            console.log('从数据库成功加载合并配置');
+                        }
+                    }
+                } catch (error) {
+                    console.error('从数据库加载合并配置失败:', error);
+                }
+            }
+        }
+        
+        if (!mergeConfig) {
+            throw new Error('未找到合并配置，请先完成合并配置设置');
+        }
+        
+        // 执行合并过程
+        showLoadingOverlay('正在执行合并配置表...', '准备合并配置', 0);
+        
+        const response = await fetch('/execute_merge', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                merge_config: mergeConfig,
+                translation_config: translationConfig
+            })
+        });
+        
+        updateLoadingProgress(30, '正在处理合并配置...');
+        const result = await response.json();
+        
+        if (result.success) {
+            updateLoadingProgress(50, '合并配置完成');
+            console.log('合并配置表执行成功');
+            // 合并后生成预览版本的清单（仅数据库匹配）
+            await generatePreviewLists(translationConfig);
+            showAlert('合并配置表执行成功，预览清单已生成', 'success');
+        } else {
+            throw new Error(result.message || '合并配置表执行失败');
+        }
+        
+    } catch (error) {
+        console.error('执行合并配置表失败:', error);
+        showAlert('执行合并配置表失败: ' + error.message, 'error');
+    } finally {
+         hideLoadingOverlay();
+     }
+ }
+
+// 生成预览版本的清单（仅数据库匹配）
+async function generatePreviewLists(translationConfig) {
+    console.log('开始生成预览清单（仅数据库匹配）...');
+    
+    try {
+        // 存储预览清单的数据
+        const listsData = {
+            codedList: null,
+            uncodedList: null,
+            datasetLabel: null,
+            variableLabel: null
+        };
+        
+        console.log('初始化 listsData:', listsData);
+        
+        showLoadingOverlay('正在生成编码清单预览...', '1/4 编码清单预览', 0);
+        
+        // 1. 生成编码清单预览（仅数据库匹配）
+        console.log('开始生成编码清单预览数据');
+        const codedListData = await generateCodedListPreviewData(translationConfig, 1, 100);
+        listsData.codedList = codedListData;
+        console.log('编码清单预览数据生成完成:', codedListData ? '有数据' : '无数据');
+        updateLoadingProgress(25, '编码清单预览完成');
+        
+        showLoadingOverlay('正在生成未编码清单预览...', '2/4 未编码清单预览', 25);
+        
+        // 2. 生成未编码清单预览
+        console.log('开始生成未编码清单预览数据');
+        const uncodedListData = await generateUncodedListPreviewData(translationConfig, 1, 100);
+        listsData.uncodedList = uncodedListData;
+        console.log('未编码清单预览数据生成完成:', uncodedListData ? '有数据' : '无数据');
+        updateLoadingProgress(50, '未编码清单预览完成');
+        
+        showLoadingOverlay('正在生成数据集标签预览...', '3/4 数据集标签预览', 50);
+        
+        // 3. 生成数据集标签预览
+        console.log('开始生成数据集标签预览数据');
+        const datasetLabelData = await generateDatasetLabelPreviewData(translationConfig, 1, 100);
+        listsData.datasetLabel = datasetLabelData;
+        console.log('数据集标签预览数据生成完成:', datasetLabelData ? '有数据' : '无数据');
+        updateLoadingProgress(75, '数据集标签预览完成');
+        
+        showLoadingOverlay('正在生成变量标签预览...', '4/4 变量标签预览', 75);
+        
+        // 4. 生成变量标签预览
+        console.log('开始生成变量标签预览数据');
+        const variableLabelData = await generateVariableLabelPreviewData(translationConfig, 1, 100);
+        listsData.variableLabel = variableLabelData;
+        console.log('变量标签预览数据生成完成:', variableLabelData ? '有数据' : '无数据');
+        updateLoadingProgress(100, '所有预览清单生成完成');
+        
+        // 存储预览清单数据到全局变量
+        console.log('设置 window.translationPreviewListsData:', listsData);
+        window.translationPreviewListsData = listsData;
+        console.log('window.translationPreviewListsData 设置完成，验证:', window.translationPreviewListsData);
+        
+        // 设置全局配置信息，用于分页功能
+        currentPreviewConfig = {
+            translation_direction: translationConfig.translation_direction,
+            path: translationConfig.path
+        };
+        console.log('设置 currentPreviewConfig:', currentPreviewConfig);
+        
+        // 默认显示编码清单预览
+        displayPreviewCodedListResults(listsData.codedList);
+        
+        // 更新按钮状态
+        updatePreviewListButtonStates('coded');
+        
+        // 添加预览清单切换事件监听器
+        setupPreviewListSwitchListeners();
+        
+        console.log('预览清单生成完成');
+        
+    } catch (error) {
+        console.error('生成预览清单失败:', error);
+        hideLoadingOverlay();
+        showAlert('生成预览清单失败: ' + (error.message || error), 'error');
+        throw error;
+    }
+}
+
 async function executeMergeProcess() {
     try {
         console.log('开始执行合并配置表逻辑...');
@@ -3208,7 +3818,7 @@ async function executeMergeProcess() {
         }
         
         // 执行合并过程
-        showLoadingOverlay('正在执行合并配置表...');
+        showLoadingOverlay('正在执行合并配置表...', '准备合并配置', 0);
         
         const response = await fetch('/execute_merge', {
             method: 'POST',
@@ -3221,9 +3831,11 @@ async function executeMergeProcess() {
             })
         });
         
+        updateLoadingProgress(30, '正在处理合并配置...');
         const result = await response.json();
         
         if (result.success) {
+            updateLoadingProgress(50, '合并配置完成');
             console.log('合并配置表执行成功');
             // 合并后直接生成四个清单
             await generateAllLists(translationConfig);
@@ -3253,29 +3865,33 @@ async function generateAllLists(translationConfig) {
             variableLabel: null
         };
         
-        showLoadingOverlay('正在生成编码清单...');
+        showLoadingOverlay('正在生成编码清单...', '1/4 编码清单', 0);
         
         // 1. 生成编码清单
         const codedListData = await generateCodedListData(translationConfig);
         listsData.codedList = codedListData;
+        updateLoadingProgress(25, '编码清单完成');
         
-        showLoadingOverlay('正在生成未编码清单...');
+        showLoadingOverlay('正在生成未编码清单...', '2/4 未编码清单', 25);
         
         // 2. 生成未编码清单
         const uncodedListData = await generateUncodedListData(translationConfig);
         listsData.uncodedList = uncodedListData;
+        updateLoadingProgress(50, '未编码清单完成');
         
-        showLoadingOverlay('正在生成数据集标签...');
+        showLoadingOverlay('正在生成数据集标签...', '3/4 数据集标签', 50);
         
         // 3. 生成数据集标签
         const datasetLabelData = await generateDatasetLabelData(translationConfig);
         listsData.datasetLabel = datasetLabelData;
+        updateLoadingProgress(75, '数据集标签完成');
         
-        showLoadingOverlay('正在生成变量标签...');
+        showLoadingOverlay('正在生成变量标签...', '4/4 变量标签', 75);
         
         // 4. 生成变量标签
         const variableLabelData = await generateVariableLabelData(translationConfig);
         listsData.variableLabel = variableLabelData;
+        updateLoadingProgress(100, '所有清单生成完成');
         
         // 存储清单数据到全局变量
         window.translationListsData = listsData;
@@ -3324,53 +3940,120 @@ function generateVariableLabelForm(mergeData, translationDirection) {
     // 这里实现变量标签表单的生成逻辑
 }
  
- // 初始化翻译与确认页面（页面加载时调用）
+ // 初始化翻译清单预览页面（页面加载时调用）
  // 防止重复绑定的标记
- let translationConfirmationInitialized = false;
+ let translationPreviewInitialized = false;
  
- function initializeTranslationConfirmation() {
+ function initializeTranslationPreview() {
     // 防止重复绑定事件
-    if (translationConfirmationInitialized) {
-        console.log('翻译确认页面已初始化，跳过重复绑定');
+    if (translationPreviewInitialized) {
+        console.log('翻译预览页面已初始化，跳过重复绑定');
         return;
     }
     
-    console.log('绑定翻译确认页面按钮事件...');
+    console.log('绑定翻译预览页面按钮事件...');
     
-    // 绑定按钮事件 - 修改为切换显示缓存的数据
-    if (translationConfirmationElements.codedListBtn) {
-        translationConfirmationElements.codedListBtn.addEventListener('click', () => {
-            console.log('编码清单按钮被点击 - 切换显示');
-            switchToList('coded');
+    // 绑定按钮事件 - 显示数据库匹配完成的结果
+    if (translationPreviewElements.previewCodedListBtn) {
+        translationPreviewElements.previewCodedListBtn.addEventListener('click', () => {
+            console.log('预览编码清单按钮被点击');
+            switchToPreviewList('coded');
         });
-        console.log('编码清单按钮事件已绑定');
+        console.log('预览编码清单按钮事件已绑定');
     } else {
-        console.warn('未找到编码清单按钮元素');
+        console.warn('未找到预览编码清单按钮元素');
     }
-    
-    if (translationConfirmationElements.uncodedListBtn) {
-        translationConfirmationElements.uncodedListBtn.addEventListener('click', () => {
-            console.log('非编码清单按钮被点击 - 切换显示');
-            switchToList('uncoded');
+
+    if (translationPreviewElements.previewUncodedListBtn) {
+        translationPreviewElements.previewUncodedListBtn.addEventListener('click', () => {
+            console.log('预览非编码清单按钮被点击');
+            switchToPreviewList('uncoded');
         });
+        console.log('预览非编码清单按钮事件已绑定');
+    } else {
+        console.warn('未找到预览非编码清单按钮元素');
     }
-    
-    if (translationConfirmationElements.datasetLabelBtn) {
-        translationConfirmationElements.datasetLabelBtn.addEventListener('click', () => {
-            console.log('数据集Label按钮被点击 - 切换显示');
-            switchToList('dataset');
+
+    if (translationPreviewElements.previewDatasetLabelBtn) {
+        translationPreviewElements.previewDatasetLabelBtn.addEventListener('click', () => {
+            console.log('预览数据集Label按钮被点击');
+            switchToPreviewList('dataset');
         });
+        console.log('预览数据集Label按钮事件已绑定');
+    } else {
+        console.warn('未找到预览数据集Label按钮元素');
     }
-    
-    if (translationConfirmationElements.variableLabelBtn) {
-        translationConfirmationElements.variableLabelBtn.addEventListener('click', () => {
-            console.log('变量Label按钮被点击 - 切换显示');
-            switchToList('variable');
+
+    if (translationPreviewElements.previewVariableLabelBtn) {
+        translationPreviewElements.previewVariableLabelBtn.addEventListener('click', () => {
+            console.log('预览变量Label按钮被点击');
+            switchToPreviewList('variable');
         });
+        console.log('预览变量Label按钮事件已绑定');
+    } else {
+        console.warn('未找到预览变量Label按钮元素');
+    }
+
+    translationPreviewInitialized = true;
+    console.log('翻译预览页面初始化完成');
+}
+
+// 初始化AI翻译页面（页面加载时调用）
+// 防止重复绑定的标记
+let aiTranslationInitialized = false;
+
+function initializeAITranslation() {
+    // 防止重复绑定事件
+    if (aiTranslationInitialized) {
+        console.log('AI翻译页面已初始化，跳过重复绑定');
+        return;
     }
     
-    translationConfirmationInitialized = true;
-    console.log('翻译确认页面初始化完成');
+    console.log('绑定AI翻译页面按钮事件...');
+    
+    // 绑定按钮事件 - 执行AI翻译
+    if (aiTranslationElements.aiCodedListBtn) {
+        aiTranslationElements.aiCodedListBtn.addEventListener('click', () => {
+            console.log('AI翻译编码清单按钮被点击');
+            switchToAITranslationList('coded');
+        });
+        console.log('AI翻译编码清单按钮事件已绑定');
+    } else {
+        console.warn('未找到AI翻译编码清单按钮元素');
+    }
+
+    if (aiTranslationElements.aiUncodedListBtn) {
+        aiTranslationElements.aiUncodedListBtn.addEventListener('click', () => {
+            console.log('AI翻译非编码清单按钮被点击');
+            switchToAITranslationList('uncoded');
+        });
+        console.log('AI翻译非编码清单按钮事件已绑定');
+    } else {
+        console.warn('未找到AI翻译非编码清单按钮元素');
+    }
+
+    if (aiTranslationElements.aiDatasetLabelBtn) {
+        aiTranslationElements.aiDatasetLabelBtn.addEventListener('click', () => {
+            console.log('AI翻译数据集Label按钮被点击');
+            switchToAITranslationList('dataset');
+        });
+        console.log('AI翻译数据集Label按钮事件已绑定');
+    } else {
+        console.warn('未找到AI翻译数据集Label按钮元素');
+    }
+
+    if (aiTranslationElements.aiVariableLabelBtn) {
+        aiTranslationElements.aiVariableLabelBtn.addEventListener('click', () => {
+            console.log('AI翻译变量Label按钮被点击');
+            switchToAITranslationList('variable');
+        });
+        console.log('AI翻译变量Label按钮事件已绑定');
+    } else {
+        console.warn('未找到AI翻译变量Label按钮元素');
+    }
+
+    aiTranslationInitialized = true;
+    console.log('AI翻译页面初始化完成');
 }
 
 // 执行合并配置（在生成子页面之前）
@@ -3443,8 +4126,242 @@ async function executeMergeConfigBeforeGeneration() {
     }
 }
 
+// 生成编码清单预览数据（仅数据库匹配）
+async function generateCodedListPreviewData(translationConfig, page = 1, pageSize = 100) {
+    try {
+        console.log('开始生成编码清单预览数据...');
+        
+        // 验证必要的配置信息
+        if (!translationConfig || !translationConfig.translation_direction || !translationConfig.path) {
+            throw new Error('缺少必要的配置信息：translation_direction 或 path');
+        }
+        
+        const response = await fetch('/api/generate_coded_list_preview', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                translation_direction: translationConfig.translation_direction,
+                path: translationConfig.path,
+                page: page,
+                page_size: pageSize
+            })
+        });
+        
+        const result = await response.json();
+        
+        if (result.success) {
+            console.log('编码清单预览数据生成成功');
+            return result;
+        } else {
+            throw new Error(result.message || '生成编码清单预览数据失败');
+        }
+        
+    } catch (error) {
+        console.error('生成编码清单预览数据失败:', error);
+        throw error;
+    }
+}
+
+// 生成未编码清单预览数据
+async function generateUncodedListPreviewData(translationConfig, page = 1, pageSize = 100) {
+    try {
+        console.log('开始生成未编码清单预览数据...');
+        
+        // 验证必要的配置信息
+        if (!translationConfig || !translationConfig.translation_direction || !translationConfig.path) {
+            throw new Error('缺少必要的配置信息：translation_direction 或 path');
+        }
+        
+        const response = await fetch('/api/generate_uncoded_list_preview', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                ...translationConfig,
+                page: page,
+                page_size: pageSize
+            })
+        });
+        
+        const result = await response.json();
+        
+        if (result.success) {
+            console.log('未编码清单预览数据生成成功:', result.summary);
+            return {
+                success: true,
+                data: result.data,
+                summary: result.summary,
+                pagination: result.pagination
+            };
+        } else {
+            console.error('生成未编码清单预览数据失败:', result.message);
+            throw new Error(result.message);
+        }
+        
+    } catch (error) {
+        console.error('生成未编码清单预览数据失败:', error);
+        throw error;
+    }
+}
+
+// 生成数据集标签预览数据
+async function generateDatasetLabelPreviewData(translationConfig, page = 1, pageSize = 100) {
+    try {
+        console.log('开始生成数据集标签预览数据...');
+        
+        // 验证必要的配置信息
+        if (!translationConfig || !translationConfig.translation_direction || !translationConfig.path) {
+            throw new Error('缺少必要的配置信息：translation_direction 或 path');
+        }
+        
+        const response = await fetch('/api/generate_dataset_label_preview', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                ...translationConfig,
+                page: page,
+                page_size: pageSize
+            })
+        });
+        
+        const result = await response.json();
+        
+        if (result.success) {
+            console.log('数据集标签预览数据生成成功:', result.summary);
+            return {
+                success: true,
+                data: result.dataset_labels,
+                summary: result.summary,
+                pagination: result.pagination
+            };
+        } else {
+            console.error('生成数据集标签预览数据失败:', result.message);
+            throw new Error(result.message);
+        }
+        
+    } catch (error) {
+        console.error('生成数据集标签预览数据失败:', error);
+        throw error;
+    }
+}
+
+// 生成变量标签预览数据
+async function generateVariableLabelPreviewData(translationConfig, page = 1, pageSize = 100) {
+    try {
+        console.log('开始生成变量标签预览数据...');
+        
+        // 验证必要的配置信息
+        if (!translationConfig || !translationConfig.translation_direction || !translationConfig.path) {
+            throw new Error('缺少必要的配置信息：translation_direction 或 path');
+        }
+        
+        const response = await fetch('/api/generate_variable_label_preview', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                ...translationConfig,
+                page: page,
+                page_size: pageSize
+            })
+        });
+        
+        const result = await response.json();
+        
+        if (result.success) {
+            console.log('变量标签预览数据生成成功:', result.summary);
+            return {
+                success: true,
+                data: result.data,
+                summary: result.summary,
+                pagination: result.pagination
+            };
+        } else {
+            console.error('生成变量标签预览数据失败:', result.message);
+            throw new Error(result.message);
+        }
+        
+    } catch (error) {
+        console.error('生成变量标签预览数据失败:', error);
+        throw error;
+    }
+}
+
+// 更新预览清单按钮状态
+function updatePreviewListButtonStates(activeType) {
+    const buttons = {
+        coded: previewTranslationElements.codedListBtn,
+        uncoded: previewTranslationElements.uncodedListBtn,
+        dataset: previewTranslationElements.datasetLabelBtn,
+        variable: previewTranslationElements.variableLabelBtn
+    };
+    
+    // 重置所有按钮状态
+    Object.values(buttons).forEach(btn => {
+        if (btn) {
+            btn.classList.remove('btn-primary');
+            btn.classList.add('btn-outline-primary');
+        }
+    });
+    
+    // 设置活动按钮状态
+    if (buttons[activeType]) {
+        buttons[activeType].classList.remove('btn-outline-primary');
+        buttons[activeType].classList.add('btn-primary');
+    }
+}
+
+// 设置预览清单切换事件监听器
+function setupPreviewListSwitchListeners() {
+    const elements = previewTranslationElements;
+    
+    if (elements.codedListBtn) {
+        elements.codedListBtn.onclick = () => {
+            if (window.translationPreviewListsData && window.translationPreviewListsData.codedList) {
+                displayPreviewCodedListResults(window.translationPreviewListsData.codedList);
+                updatePreviewListButtonStates('coded');
+            }
+        };
+    }
+    
+    if (elements.uncodedListBtn) {
+        elements.uncodedListBtn.onclick = () => {
+            if (window.translationPreviewListsData && window.translationPreviewListsData.uncodedList) {
+                displayPreviewUncodedListResults(window.translationPreviewListsData.uncodedList);
+                updatePreviewListButtonStates('uncoded');
+            }
+        };
+    }
+    
+    if (elements.datasetLabelBtn) {
+        elements.datasetLabelBtn.onclick = () => {
+            if (window.translationPreviewListsData && window.translationPreviewListsData.datasetLabel) {
+                displayDatasetLabelResults(window.translationPreviewListsData.datasetLabel);
+                updatePreviewListButtonStates('dataset');
+            }
+        };
+    }
+    
+    if (elements.variableLabelBtn) {
+        elements.variableLabelBtn.onclick = () => {
+            if (window.translationPreviewListsData && window.translationPreviewListsData.variableLabel) {
+                displayVariableLabelResults(window.translationPreviewListsData.variableLabel);
+                updatePreviewListButtonStates('variable');
+            }
+        };
+    }
+}
+
 // 生成编码清单
 // 生成编码列表数据（用于批量生成）
+// 生成编码清单预览数据（仅数据库匹配）
+// 生成编码清单数据
 async function generateCodedListData(translationConfig) {
     console.log('开始生成编码列表数据...');
     
@@ -3539,8 +4456,11 @@ async function generateUncodedList() {
             return;
         }
         
+        // 保存当前配置以支持分页
+        currentUncodedListConfig = config;
+        
         // 使用新的数据生成函数
-        const data = await generateUncodedListData(config);
+        const data = await generateUncodedListData(config, 1, currentUncodedListPageSize);
         showAlert('非编码清单生成成功', 'success');
         // 显示生成的清单数据
         displayUncodedListResults(data);
@@ -4193,7 +5113,8 @@ document.addEventListener('DOMContentLoaded', function() {
     // 延迟初始化，确保所有元素都已加载
     setTimeout(() => {
         initializeTranslationLibrary();
-        initializeTranslationConfirmation();
+        // 移除未定义的函数调用
+        // initializeTranslationConfirmation();
     }, 100);
 });
 
@@ -4202,7 +5123,13 @@ if (translationLibraryTab) {
     translationLibraryTab.addEventListener('shown.bs.tab', function() {
         console.log('翻译库版本控制标签页被激活');
         // 当切换到翻译库版本控制标签页时，重新加载配置和版本选项
-        loadVersionOptions();
+        // 只有在缓存无效时才重新加载版本选项
+        if (!isVersionCacheValid()) {
+            loadVersionOptions();
+        } else {
+            // 使用缓存数据重新填充选择器（可能因为翻译方向改变）
+            populateVersionSelectorsFromCache();
+        }
         loadTranslationLibraryConfig();
         loadAvailableVariables();
         // 确保版本选择器显示
@@ -4211,6 +5138,446 @@ if (translationLibraryTab) {
 }
 
 // 显示编码清单结果
+// 显示预览编码清单结果（仅显示数据库匹配的结果）
+function displayPreviewCodedListResults(data) {
+    console.log('displayPreviewCodedListResults called with data:', data);
+    
+    if (!data || !data.success) {
+        showAlert('生成编码清单预览失败: ' + (data ? data.message : '未知错误'), 'error');
+        return;
+    }
+    
+    // 保存当前配置
+    currentPreviewConfig = {
+        translation_direction: data.translation_direction,
+        path: data.path
+    };
+    currentPreviewListType = 'coded';
+    
+    // 提取编码清单数据和版本信息
+    const codedItems = data.data || [];
+    const meddraVersion = data.meddra_version || 'N/A';
+    const whodrugVersion = data.whodrug_version || 'N/A';
+    
+    console.log('Extracted versions:', { meddraVersion, whodrugVersion });
+    
+    // 首先切换到翻译清单预览标签页
+    const translationPreviewTab = document.querySelector('#translation-preview-tab');
+    const translationPreviewTabPane = document.getElementById('translation-preview-content');
+    
+    if (translationPreviewTab && translationPreviewTabPane) {
+        console.log('Switching to translation-preview tab...');
+        
+        // 移除所有标签页的active类
+        document.querySelectorAll('.tab-pane').forEach(pane => {
+            pane.classList.remove('show', 'active');
+        });
+        document.querySelectorAll('.nav-link').forEach(link => {
+            link.classList.remove('active');
+        });
+        
+        // 激活翻译清单预览标签页
+        translationPreviewTab.classList.add('active');
+        translationPreviewTabPane.classList.add('show', 'active');
+        
+        console.log('Tab switched successfully');
+    } else {
+        console.error('Translation preview tab not found!');
+    }
+    
+    const container = document.getElementById('previewTranslationContentArea');
+    console.log('Container element:', container);
+    
+    if (!container) {
+        console.error('未找到预览结果容器 translationContentArea');
+        return;
+    }
+    
+    let html = `
+        <div class="card">
+            <div class="card-header">
+                <h5 class="mb-0">编码清单预览 (${data.summary?.total_items || codedItems.length} 项数据库匹配)</h5>
+                <small class="text-muted">MedDRA版本: ${meddraVersion} | WHODrug版本: ${whodrugVersion}</small>
+            </div>
+            <div class="card-body">
+                <!-- 筛选控件 -->
+                <div class="row mb-3">
+                    <div class="col-md-3">
+                        <label class="form-label">数据集筛选</label>
+                        <select class="form-select form-select-sm" id="coded-dataset-filter" onchange="applyCodedListFilters()">
+                            <option value="">全部数据集</option>
+                        </select>
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label">变量筛选</label>
+                        <select class="form-select form-select-sm" id="coded-variable-filter" onchange="applyCodedListFilters()">
+                            <option value="">全部变量</option>
+                        </select>
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label">翻译来源筛选</label>
+                        <select class="form-select form-select-sm" id="coded-source-filter" onchange="applyCodedListFilters()">
+                            <option value="">全部来源</option>
+                            <option value="Database">Database</option>
+                            <option value="user">用户</option>
+                        </select>
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label">关键词搜索</label>
+                        <input type="text" class="form-control form-control-sm" id="coded-search-input" 
+                               placeholder="搜索原始值或翻译值" onkeyup="applyCodedListFilters()">
+                    </div>
+                </div>
+                <div class="table-responsive">
+                    <table class="table table-striped table-hover" id="coded-list-table">
+                        <thead class="table-dark">
+                            <tr>
+                                <th style="width: 12%;">数据集</th>
+                                <th style="width: 12%;">变量</th>
+                                <th style="width: 20%;">原始值</th>
+                                <th style="width: 15%;">Code</th>
+                                <th style="width: 35%;">翻译值</th>
+                                <th style="width: 6%;">翻译来源</th>
+                            </tr>
+                        </thead>
+                        <tbody id="coded-list-tbody">
+    `;
+    
+    if (codedItems.length === 0) {
+        html += `
+            <tr>
+                <td colspan="6" class="text-center text-muted py-4">
+                    <i class="fas fa-info-circle me-2"></i>
+                    暂无数据库匹配的项目
+                </td>
+            </tr>
+        `;
+    } else {
+        codedItems.forEach((item, index) => {
+            html += `
+                <tr data-item-index="${index}">
+                    <td>${item.dataset}</td>
+                    <td><code>${item.variable}</code></td>
+                    <td>${item.value}</td>
+                    <td><code>${item.code || ''}</code></td>
+                    <td>
+                        <input type="text" 
+                               class="form-control form-control-sm editable-translation" 
+                               value="${item.translated_value || ''}" 
+                               data-original-value="${item.translated_value || ''}"
+                               data-item-index="${index}"
+                               placeholder="输入翻译值">
+                    </td>
+                    <td>
+                        <span class="badge ${item.translation_source === 'user' ? 'bg-success' : 'bg-primary'}" 
+                              data-item-index="${index}">
+                            ${item.translation_source}
+                        </span>
+                    </td>
+                </tr>
+            `;
+        });
+    }
+    
+    html += `
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    `;
+    
+    // 添加分页控件
+    if (data.pagination) {
+        html += generatePreviewPaginationControls(data.pagination, 'coded');
+    }
+    
+    console.log('Setting container innerHTML with html length:', html.length);
+    
+    container.innerHTML = html;
+    
+    // 保存原始数据用于筛选
+    window.codedListOriginalData = codedItems;
+    
+    // 初始化筛选选项
+    initializeCodedListFilters(codedItems);
+    
+    // 添加翻译值编辑事件监听器
+    setupTranslationEditingListeners(container, 'coded');
+    
+    console.log('Container innerHTML set successfully');
+    
+    // 滚动到容器位置
+    container.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+// 初始化编码清单筛选选项
+function initializeCodedListFilters(data) {
+    const datasetFilter = document.getElementById('coded-dataset-filter');
+    const variableFilter = document.getElementById('coded-variable-filter');
+    
+    if (!datasetFilter || !variableFilter) return;
+    
+    // 获取唯一的数据集和变量
+    const datasets = [...new Set(data.map(item => item.dataset))].sort();
+    const variables = [...new Set(data.map(item => item.variable))].sort();
+    
+    // 填充数据集筛选选项
+    datasetFilter.innerHTML = '<option value="">全部数据集</option>';
+    datasets.forEach(dataset => {
+        datasetFilter.innerHTML += `<option value="${dataset}">${dataset}</option>`;
+    });
+    
+    // 填充变量筛选选项
+    variableFilter.innerHTML = '<option value="">全部变量</option>';
+    variables.forEach(variable => {
+        variableFilter.innerHTML += `<option value="${variable}">${variable}</option>`;
+    });
+}
+
+// 应用编码清单筛选
+function applyCodedListFilters() {
+    const datasetFilter = document.getElementById('coded-dataset-filter');
+    const variableFilter = document.getElementById('coded-variable-filter');
+    const sourceFilter = document.getElementById('coded-source-filter');
+    const searchInput = document.getElementById('coded-search-input');
+    const tbody = document.getElementById('coded-list-tbody');
+    
+    if (!datasetFilter || !variableFilter || !sourceFilter || !searchInput || !tbody) return;
+    
+    const datasetValue = datasetFilter.value;
+    const variableValue = variableFilter.value;
+    const sourceValue = sourceFilter.value;
+    const searchValue = searchInput.value.toLowerCase();
+    
+    // 筛选数据
+    let filteredData = window.codedListOriginalData || [];
+    
+    if (datasetValue) {
+        filteredData = filteredData.filter(item => item.dataset === datasetValue);
+    }
+    
+    if (variableValue) {
+        filteredData = filteredData.filter(item => item.variable === variableValue);
+    }
+    
+    if (sourceValue) {
+        filteredData = filteredData.filter(item => item.translation_source === sourceValue);
+    }
+    
+    if (searchValue) {
+        filteredData = filteredData.filter(item => 
+            (item.value && item.value.toLowerCase().includes(searchValue)) ||
+            (item.translated_value && item.translated_value.toLowerCase().includes(searchValue))
+        );
+    }
+    
+    // 重新渲染表格内容
+    let html = '';
+    if (filteredData.length === 0) {
+        html = `
+            <tr>
+                <td colspan="6" class="text-center text-muted py-4">
+                    <i class="fas fa-info-circle me-2"></i>
+                    没有符合筛选条件的数据
+                </td>
+            </tr>
+        `;
+    } else {
+        filteredData.forEach((item, index) => {
+            html += `
+                <tr data-item-index="${index}">
+                    <td>${item.dataset}</td>
+                    <td><code>${item.variable}</code></td>
+                    <td>${item.value}</td>
+                    <td><code>${item.code || ''}</code></td>
+                    <td>
+                        <input type="text" 
+                               class="form-control form-control-sm editable-translation" 
+                               value="${item.translated_value || ''}" 
+                               data-original-value="${item.translated_value || ''}"
+                               data-item-index="${index}"
+                               placeholder="输入翻译值">
+                    </td>
+                    <td>
+                        <span class="badge ${item.translation_source === 'user' ? 'bg-success' : 'bg-primary'}" 
+                              data-item-index="${index}">
+                            ${item.translation_source}
+                        </span>
+                    </td>
+                </tr>
+            `;
+        });
+    }
+    
+    tbody.innerHTML = html;
+    
+    // 重新绑定编辑事件监听器
+    const container = document.getElementById('preview-results');
+    if (container) {
+        setupTranslationEditingListeners(container, 'coded');
+    }
+}
+
+// 显示预览非编码清单结果
+function displayPreviewUncodedListResults(data) {
+    
+    // 检查容器的样式和位置信息
+    const rect = container.getBoundingClientRect();
+    const computedStyle = window.getComputedStyle(container);
+    console.log('Container position and size:', {
+        top: rect.top,
+        left: rect.left,
+        width: rect.width,
+        height: rect.height,
+        display: computedStyle.display,
+        visibility: computedStyle.visibility,
+        opacity: computedStyle.opacity,
+        overflow: computedStyle.overflow
+    });
+    
+    // 强制容器重新布局和显示
+    container.style.display = 'block';
+    container.style.width = '100%';
+    container.style.minHeight = '200px';
+    
+    // 检查父容器
+    const parentElement = container.parentElement;
+    console.log('Parent element:', parentElement);
+    if (parentElement) {
+        const parentRect = parentElement.getBoundingClientRect();
+        const parentStyle = window.getComputedStyle(parentElement);
+        console.log('Parent position and size:', {
+            top: parentRect.top,
+            left: parentRect.left,
+            width: parentRect.width,
+            height: parentRect.height,
+            display: parentStyle.display,
+            visibility: parentStyle.visibility
+        });
+    }
+    
+    // 再次检查容器尺寸
+    setTimeout(() => {
+        const newRect = container.getBoundingClientRect();
+        console.log('Container size after style fix:', {
+            width: newRect.width,
+            height: newRect.height,
+            top: newRect.top,
+            left: newRect.left
+        });
+    }, 100);
+}
+
+// 显示AI翻译编码清单结果（包含AI翻译功能，AI来源排序到前面）
+function displayAITranslationCodedListResults(data) {
+    console.log('显示AI翻译编码清单结果:', data);
+    
+    const container = document.getElementById('aiTranslationContentArea');
+    if (!container) {
+        console.error('未找到AI翻译结果容器');
+        return;
+    }
+    
+    const codedItems = data.coded_items || [];
+    // 将AI翻译的项目排序到前面，并过滤掉空值
+    const sortedItems = codedItems
+        .filter(item => item.translated_value && item.translated_value.trim() !== '') // 过滤空值
+        .sort((a, b) => {
+            if (a.translation_source === 'AI' && b.translation_source !== 'AI') return -1;
+            if (a.translation_source !== 'AI' && b.translation_source === 'AI') return 1;
+            return 0;
+        });
+    
+    let html = `
+        <div class="card">
+            <div class="card-header">
+                <h5 class="mb-0">AI翻译编码清单 (${sortedItems.length} 项)</h5>
+                <small class="text-muted">MedDRA版本: ${data.meddra_version || 'N/A'} | WHODrug版本: ${data.whodrug_version || 'N/A'}</small>
+                <div class="mt-2">
+                    <button class="btn btn-success btn-sm" onclick="executeAITranslation('coded')">
+                        <i class="fas fa-robot me-2"></i>执行AI翻译
+                    </button>
+                </div>
+            </div>
+            <div class="card-body">
+                <div class="table-responsive">
+                    <table class="table table-striped table-hover">
+                        <thead class="table-dark">
+                            <tr>
+                                <th>数据集</th>
+                                <th>变量</th>
+                                <th>原始值</th>
+                                <th>Code</th>
+                                <th>翻译值</th>
+                                <th>翻译来源</th>
+                                <th>需要确认</th>
+                                <th>操作</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+    `;
+    
+    if (sortedItems.length === 0) {
+        html += `
+            <tr>
+                <td colspan="8" class="text-center text-muted py-4">
+                    <i class="fas fa-info-circle me-2"></i>
+                    暂无翻译项目或所有翻译值为空
+                </td>
+            </tr>
+        `;
+    } else {
+        sortedItems.forEach((item, index) => {
+            const needsConfirmation = item.needs_confirmation === 'Y';
+            const isAITranslation = item.translation_source === 'AI';
+            
+            html += `
+                <tr class="${needsConfirmation ? 'table-warning' : ''} ${isAITranslation ? 'table-success' : ''}">
+                    <td>${item.dataset}</td>
+                    <td><code>${item.variable}</code></td>
+                    <td>${item.value}</td>
+                    <td><code>${item.code || ''}</code></td>
+                    <td>
+                        <input type="text" class="form-control form-control-sm" 
+                               value="${item.translated_value || ''}" 
+                               data-index="${index}" 
+                               ${isAITranslation ? 'style="border-color: #28a745;"' : ''}>
+                    </td>
+                    <td>
+                        <span class="badge ${isAITranslation ? 'bg-success' : 'bg-primary'}">
+                            ${item.translation_source}
+                        </span>
+                    </td>
+                    <td>
+                        <span class="badge ${needsConfirmation ? 'bg-warning' : 'bg-success'}">
+                            ${needsConfirmation ? '需要确认' : '已确认'}
+                        </span>
+                    </td>
+                    <td>
+                        <button class="btn btn-sm btn-outline-primary" onclick="confirmTranslation(${index}, 'coded')">
+                            确认
+                        </button>
+                    </td>
+                </tr>
+            `;
+        });
+    }
+    
+    html += `
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    `;
+    
+    container.innerHTML = html;
+    
+    // 添加翻译值编辑事件监听器
+    setupTranslationEditingListeners(container, 'uncoded');
+}
+
 function displayCodedListResults(data) {
     console.log('显示编码清单结果:', data);
     
@@ -4290,34 +5657,46 @@ function displayCodedListResults(data) {
     `;
     
     container.innerHTML = html;
+    
+    // 添加翻译值编辑事件监听器
+    setupTranslationEditingListeners(container, 'dataset');
 }
 
 // 生成分页控件
-function generatePaginationControls(pagination, listType) {
+// 生成预览分页控件
+function generatePreviewPaginationControls(pagination, listType) {
     if (!pagination || pagination.total_pages <= 1) {
         return '';
     }
     
     const currentPage = pagination.current_page;
     const totalPages = pagination.total_pages;
-    const hasPrev = pagination.has_prev;
-    const hasNext = pagination.has_next;
+    const hasPrev = currentPage > 1;
+    const hasNext = currentPage < totalPages;
+    const totalCount = pagination.total_items || pagination.total_count;
     
     let paginationHtml = `
         <div class="d-flex justify-content-between align-items-center mt-3">
             <div>
                 <small class="text-muted">
-                    显示第 ${((currentPage - 1) * pagination.page_size) + 1} - ${Math.min(currentPage * pagination.page_size, pagination.total_count)} 项，
-                    共 ${pagination.total_count} 项
+                    显示第 ${((currentPage - 1) * pagination.page_size) + 1} - ${Math.min(currentPage * pagination.page_size, totalCount)} 项，
+                    共 ${totalCount} 项
                 </small>
             </div>
-            <nav>
-                <ul class="pagination pagination-sm mb-0">
-                    <li class="page-item ${!hasPrev ? 'disabled' : ''}">
-                        <button class="page-link" onclick="loadPage(${currentPage - 1}, '${listType}')" ${!hasPrev ? 'disabled' : ''}>
-                            上一页
-                        </button>
-                    </li>
+            <div class="d-flex align-items-center">
+                <select class="form-select form-select-sm me-2" style="width: auto;" 
+                        onchange="changePreviewPageSize(this.value, '${listType}')">
+                    <option value="50" ${pagination.page_size === 50 ? 'selected' : ''}>50/页</option>
+                    <option value="100" ${pagination.page_size === 100 ? 'selected' : ''}>100/页</option>
+                    <option value="200" ${pagination.page_size === 200 ? 'selected' : ''}>200/页</option>
+                </select>
+                <nav>
+                    <ul class="pagination pagination-sm mb-0">
+                        <li class="page-item ${!hasPrev ? 'disabled' : ''}">
+                            <button class="page-link" onclick="loadPreviewPage(${currentPage - 1}, '${listType}')" ${!hasPrev ? 'disabled' : ''}>
+                                上一页
+                            </button>
+                        </li>
     `;
     
     // 生成页码按钮
@@ -4327,7 +5706,7 @@ function generatePaginationControls(pagination, listType) {
     if (startPage > 1) {
         paginationHtml += `
             <li class="page-item">
-                <button class="page-link" onclick="loadPage(1, '${listType}')">1</button>
+                <button class="page-link" onclick="loadPreviewPage(1, '${listType}')">1</button>
             </li>
         `;
         if (startPage > 2) {
@@ -4338,7 +5717,7 @@ function generatePaginationControls(pagination, listType) {
     for (let i = startPage; i <= endPage; i++) {
         paginationHtml += `
             <li class="page-item ${i === currentPage ? 'active' : ''}">
-                <button class="page-link" onclick="loadPage(${i}, '${listType}')">${i}</button>
+                <button class="page-link" onclick="loadPreviewPage(${i}, '${listType}')">${i}</button>
             </li>
         `;
     }
@@ -4349,19 +5728,20 @@ function generatePaginationControls(pagination, listType) {
         }
         paginationHtml += `
             <li class="page-item">
-                <button class="page-link" onclick="loadPage(${totalPages}, '${listType}')">${totalPages}</button>
+                <button class="page-link" onclick="loadPreviewPage(${totalPages}, '${listType}')">${totalPages}</button>
             </li>
         `;
     }
     
     paginationHtml += `
-                    <li class="page-item ${!hasNext ? 'disabled' : ''}">
-                        <button class="page-link" onclick="loadPage(${currentPage + 1}, '${listType}')" ${!hasNext ? 'disabled' : ''}>
-                            下一页
-                        </button>
-                    </li>
-                </ul>
-            </nav>
+                        <li class="page-item ${!hasNext ? 'disabled' : ''}">
+                            <button class="page-link" onclick="loadPreviewPage(${currentPage + 1}, '${listType}')" ${!hasNext ? 'disabled' : ''}>
+                                下一页
+                            </button>
+                        </li>
+                    </ul>
+                </nav>
+            </div>
         </div>
     `;
     
@@ -4419,6 +5799,31 @@ function displayUncodedListResults(data) {
                 </div>
             </div>
             <div class="card-body">
+                <!-- 分页控制 -->
+                <div class="d-flex justify-content-between align-items-center mb-3">
+                    <div>
+                        <button class="btn btn-outline-secondary btn-sm" 
+                                onclick="loadUncodedListPage(${pagination.current_page - 1})" 
+                                ${!pagination.has_prev ? 'disabled' : ''}>
+                            <i class="fas fa-chevron-left"></i> 上一页
+                        </button>
+                        <span class="mx-2">第 ${pagination.current_page || 1} 页 / 共 ${pagination.total_pages || 1} 页</span>
+                        <button class="btn btn-outline-secondary btn-sm" 
+                                onclick="loadUncodedListPage(${pagination.current_page + 1})" 
+                                ${!pagination.has_next ? 'disabled' : ''}>
+                            下一页 <i class="fas fa-chevron-right"></i>
+                        </button>
+                    </div>
+                    <div>
+                        <select class="form-select form-select-sm" onchange="changeUncodedListPageSize(this.value)" style="width: auto;">
+                            <option value="50" ${pagination.page_size === 50 ? 'selected' : ''}>50条/页</option>
+                            <option value="100" ${pagination.page_size === 100 ? 'selected' : ''}>100条/页</option>
+                            <option value="200" ${pagination.page_size === 200 ? 'selected' : ''}>200条/页</option>
+                            <option value="500" ${pagination.page_size === 500 ? 'selected' : ''}>500条/页</option>
+                        </select>
+                    </div>
+                </div>
+                
                 <div class="table-responsive">
                     <table class="table table-striped table-hover">
                         <thead class="table-dark">
@@ -4476,6 +5881,929 @@ function displayUncodedListResults(data) {
                     <button class="btn btn-sm btn-outline-primary" onclick="confirmTranslation(${index}, 'uncoded')">
                         确认
                     </button>
+                </td>
+            </tr>
+        `;
+    });
+    
+    html += `
+                        </tbody>
+                    </table>
+                </div>
+                
+                <!-- 底部分页控制 -->
+                <div class="d-flex justify-content-center mt-3">
+                    <nav aria-label="分页导航">
+                        <ul class="pagination pagination-sm">
+                            <li class="page-item ${!pagination.has_prev ? 'disabled' : ''}">
+                                <a class="page-link" href="#" onclick="loadUncodedListPage(${pagination.current_page - 1})">上一页</a>
+                            </li>
+    `;
+    
+    // 生成页码
+    const currentPage = pagination.current_page || 1;
+    const totalPages = pagination.total_pages || 1;
+    const startPage = Math.max(1, currentPage - 2);
+    const endPage = Math.min(totalPages, currentPage + 2);
+    
+    for (let i = startPage; i <= endPage; i++) {
+        html += `
+            <li class="page-item ${i === currentPage ? 'active' : ''}">
+                <a class="page-link" href="#" onclick="loadUncodedListPage(${i})">${i}</a>
+            </li>
+        `;
+    }
+    
+    html += `
+                            <li class="page-item ${!pagination.has_next ? 'disabled' : ''}">
+                                <a class="page-link" href="#" onclick="loadUncodedListPage(${pagination.current_page + 1})">下一页</a>
+                            </li>
+                        </ul>
+                    </nav>
+                </div>
+            </div>
+        </div>
+    `;
+    
+}
+
+// 显示预览非编码清单结果（仅显示数据库匹配的结果）
+function displayPreviewUncodedListResults(data) {
+    console.log('显示预览非编码清单结果:', data);
+    
+    if (!data || !data.success) {
+        showAlert('生成非编码清单预览失败: ' + (data ? data.message : '未知错误'), 'error');
+        return;
+    }
+    
+    // 保存当前配置
+    currentPreviewConfig = data.translationConfig || {};
+    currentPreviewListType = 'uncoded';
+    
+    // 提取未编码清单数据和版本信息
+    const uncodedItems = data.data || [];
+    const meddraVersion = data.meddra_version || 'N/A';
+    const whodrugVersion = data.whodrug_version || 'N/A';
+    
+    console.log('Extracted versions:', { meddraVersion, whodrugVersion });
+    
+    // 首先切换到翻译清单预览标签页
+    const translationPreviewTab = document.querySelector('#translation-preview-tab');
+    const translationPreviewTabPane = document.getElementById('translation-preview-content');
+    
+    if (translationPreviewTab && translationPreviewTabPane) {
+        console.log('Switching to translation-preview tab...');
+        
+        // 移除所有标签页的active类
+        document.querySelectorAll('.tab-pane').forEach(pane => {
+            pane.classList.remove('show', 'active');
+        });
+        document.querySelectorAll('.nav-link').forEach(link => {
+            link.classList.remove('active');
+        });
+        
+        // 激活翻译清单预览标签页
+        translationPreviewTab.classList.add('active');
+        translationPreviewTabPane.classList.add('show', 'active');
+        
+        console.log('Tab switched successfully');
+    } else {
+        console.error('Translation preview tab not found!');
+    }
+    
+    const container = document.getElementById('previewTranslationContentArea');
+    if (!container) {
+        console.error('未找到预览结果容器');
+        return;
+    }
+    
+    console.log('Uncoded items found:', uncodedItems.length);
+    
+    let html = `
+        <div class="card">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <div>
+                    <h5 class="mb-0">非编码清单预览</h5>
+                    <small class="text-muted">仅显示数据库匹配结果 | 总计: ${data.summary?.total_items || uncodedItems.length} 项</small>
+                </div>
+            </div>
+            <div class="card-body">
+                <!-- 筛选控件 -->
+                <div class="row mb-3">
+                    <div class="col-md-3">
+                        <label class="form-label">数据集筛选</label>
+                        <select class="form-select form-select-sm" id="uncoded-dataset-filter" onchange="applyUncodedListFilters()">
+                            <option value="">全部数据集</option>
+                        </select>
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label">变量筛选</label>
+                        <select class="form-select form-select-sm" id="uncoded-variable-filter" onchange="applyUncodedListFilters()">
+                            <option value="">全部变量</option>
+                        </select>
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label">翻译来源筛选</label>
+                        <select class="form-select form-select-sm" id="uncoded-source-filter" onchange="applyUncodedListFilters()">
+                            <option value="">全部来源</option>
+                            <option value="Database">Database</option>
+                            <option value="user">用户</option>
+                            <option value="metadata_multiple">多重匹配</option>
+                        </select>
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label">关键词搜索</label>
+                        <input type="text" class="form-control form-control-sm" id="uncoded-search-input" 
+                               placeholder="搜索原始值或翻译值" onkeyup="applyUncodedListFilters()">
+                    </div>
+                </div>
+                <div class="table-responsive">
+                    <table class="table table-striped table-hover" id="uncoded-list-table">
+                        <thead class="table-dark">
+                            <tr>
+                                <th style="width: 15%;">数据集</th>
+                                <th style="width: 15%;">变量</th>
+                                <th style="width: 20%;">原始值</th>
+                                <th style="width: 40%;">翻译值</th>
+                                <th style="width: 10%;">翻译来源</th>
+                            </tr>
+                        </thead>
+                        <tbody id="uncoded-list-tbody">
+    `;
+    
+    uncodedItems.forEach((item, index) => {
+        const isMetadataMultiple = item.translation_source === 'metadata_multiple';
+        const hasHighlight = item.highlight === true;
+        
+        let rowClass = '';
+        if (hasHighlight) {
+            rowClass = 'table-danger';
+        }
+        
+        html += `
+            <tr class="${rowClass}" data-item-index="${index}">
+                <td>${item.dataset}</td>
+                <td><code>${item.variable}</code></td>
+                <td>${item.value}</td>
+                <td>
+                    <input type="text" 
+                           class="form-control form-control-sm editable-translation" 
+                           value="${item.translated_value || ''}" 
+                           data-original-value="${item.translated_value || ''}"
+                           data-item-index="${index}"
+                           placeholder="输入翻译值">
+                </td>
+                <td>
+                    <span class="badge ${item.translation_source === 'user' ? 'bg-success' : (isMetadataMultiple ? 'bg-warning' : 'bg-info')}" 
+                          data-item-index="${index}">
+                        ${item.translation_source === 'metadata_multiple' ? 'Metadata(多个)' : item.translation_source}
+                    </span>
+                </td>
+            </tr>
+        `;
+    });
+    
+    html += `
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    `;
+    
+    // 添加分页控件
+    if (data.pagination) {
+        html += generatePreviewPaginationControls(data.pagination, 'uncoded');
+    }
+    
+    container.innerHTML = html;
+    
+    // 保存原始数据用于筛选
+    window.uncodedListOriginalData = uncodedItems;
+    
+    // 初始化筛选选项
+    initializeUncodedListFilters(uncodedItems);
+    
+    // 添加翻译值编辑事件监听器
+    setupTranslationEditingListeners(container, 'variable');
+}
+
+// 初始化非编码清单筛选选项
+function initializeUncodedListFilters(data) {
+    const datasetFilter = document.getElementById('uncoded-dataset-filter');
+    const variableFilter = document.getElementById('uncoded-variable-filter');
+    
+    if (!datasetFilter || !variableFilter) return;
+    
+    // 获取唯一的数据集和变量
+    const datasets = [...new Set(data.map(item => item.dataset))].sort();
+    const variables = [...new Set(data.map(item => item.variable))].sort();
+    
+    // 填充数据集筛选选项
+    datasetFilter.innerHTML = '<option value="">全部数据集</option>';
+    datasets.forEach(dataset => {
+        datasetFilter.innerHTML += `<option value="${dataset}">${dataset}</option>`;
+    });
+    
+    // 填充变量筛选选项
+    variableFilter.innerHTML = '<option value="">全部变量</option>';
+    variables.forEach(variable => {
+        variableFilter.innerHTML += `<option value="${variable}">${variable}</option>`;
+    });
+}
+
+// 应用非编码清单筛选
+function applyUncodedListFilters() {
+    const datasetFilter = document.getElementById('uncoded-dataset-filter');
+    const variableFilter = document.getElementById('uncoded-variable-filter');
+    const sourceFilter = document.getElementById('uncoded-source-filter');
+    const searchInput = document.getElementById('uncoded-search-input');
+    const tbody = document.getElementById('uncoded-list-tbody');
+    
+    if (!datasetFilter || !variableFilter || !sourceFilter || !searchInput || !tbody) return;
+    
+    const datasetValue = datasetFilter.value;
+    const variableValue = variableFilter.value;
+    const sourceValue = sourceFilter.value;
+    const searchValue = searchInput.value.toLowerCase();
+    
+    // 筛选数据
+    let filteredData = window.uncodedListOriginalData || [];
+    
+    if (datasetValue) {
+        filteredData = filteredData.filter(item => item.dataset === datasetValue);
+    }
+    
+    if (variableValue) {
+        filteredData = filteredData.filter(item => item.variable === variableValue);
+    }
+    
+    if (sourceValue) {
+        filteredData = filteredData.filter(item => item.translation_source === sourceValue);
+    }
+    
+    if (searchValue) {
+        filteredData = filteredData.filter(item => 
+            (item.value && item.value.toLowerCase().includes(searchValue)) ||
+            (item.translated_value && item.translated_value.toLowerCase().includes(searchValue))
+        );
+    }
+    
+    // 重新渲染表格内容
+    let html = '';
+    if (filteredData.length === 0) {
+        html = `
+            <tr>
+                <td colspan="5" class="text-center text-muted py-4">
+                    <i class="fas fa-info-circle me-2"></i>
+                    没有符合筛选条件的数据
+                </td>
+            </tr>
+        `;
+    } else {
+        filteredData.forEach((item, index) => {
+            const isMetadataMultiple = item.translation_source === 'metadata_multiple';
+            html += `
+                <tr data-item-index="${index}">
+                    <td>${item.dataset}</td>
+                    <td><code>${item.variable}</code></td>
+                    <td>${item.value}</td>
+                    <td>
+                        <input type="text" 
+                               class="form-control form-control-sm editable-translation" 
+                               value="${item.translated_value || ''}" 
+                               data-original-value="${item.translated_value || ''}"
+                               data-item-index="${index}"
+                               placeholder="输入翻译值">
+                    </td>
+                    <td>
+                        <span class="badge ${item.translation_source === 'user' ? 'bg-success' : (isMetadataMultiple ? 'bg-warning' : 'bg-info')}" 
+                              data-item-index="${index}">
+                            ${item.translation_source === 'metadata_multiple' ? 'Metadata(多个)' : item.translation_source}
+                        </span>
+                    </td>
+                </tr>
+            `;
+        });
+    }
+    
+    tbody.innerHTML = html;
+    
+    // 重新绑定编辑事件监听器
+    const container = document.getElementById('previewTranslationContentArea');
+    if (container) {
+        setupTranslationEditingListeners(container, 'variable');
+    }
+}
+
+// 显示预览数据集标签结果
+function displayPreviewDatasetLabelResults(data) {
+    console.log('显示预览数据集标签结果:', data);
+    
+    // 数据校验
+    if (!data) {
+        console.error('数据为空');
+        return;
+    }
+    
+    // 保存当前配置
+    currentPreviewConfig = data;
+    currentPreviewListType = 'dataset';
+    
+    // 提取数据集标签数据和版本信息
+    const datasetData = data.datasetLabel || data;
+    const meddraVersion = data.meddra_version || 'N/A';
+    const whodrugVersion = data.whodrug_version || 'N/A';
+    
+    console.log('Extracted versions:', { meddraVersion, whodrugVersion });
+    
+    // 首先切换到翻译清单预览标签页
+    const translationPreviewTab = document.querySelector('#translation-preview-tab');
+    const translationPreviewTabPane = document.getElementById('translation-preview-content');
+    
+    if (translationPreviewTab && translationPreviewTabPane) {
+        console.log('Switching to translation-preview tab...');
+        
+        // 移除所有标签页的active类
+        document.querySelectorAll('.tab-pane').forEach(pane => {
+            pane.classList.remove('show', 'active');
+        });
+        document.querySelectorAll('.nav-link').forEach(link => {
+            link.classList.remove('active');
+        });
+        
+        // 激活翻译清单预览标签页
+        translationPreviewTab.classList.add('active');
+        translationPreviewTabPane.classList.add('show', 'active');
+        
+        console.log('Tab switched successfully');
+    } else {
+        console.error('Translation preview tab not found!');
+    }
+    
+    const container = document.getElementById('previewTranslationContentArea');
+    if (!container) {
+        console.error('未找到预览结果容器');
+        return;
+    }
+    
+    const datasetItems = data.dataset_labels || data.datasetLabel?.data || data.data || [];
+    const summary = data.datasetLabel?.summary || data.summary || {};
+    
+    console.log('Dataset items found:', datasetItems.length);
+    console.log('First few dataset items:', datasetItems.slice(0, 3));
+    
+    let html = `
+        <div class="card">
+            <div class="card-header">
+                <h5 class="mb-0">数据集标签预览 (${datasetItems.length} 项)</h5>
+                <small class="text-muted">仅显示数据库匹配结果，不执行AI翻译</small>
+            </div>
+            <div class="card-body">
+                <!-- 筛选控件 -->
+                <div class="row mb-3">
+                    <div class="col-md-4">
+                        <label class="form-label">数据集筛选</label>
+                        <select class="form-select form-select-sm" id="dataset-label-dataset-filter" onchange="applyDatasetLabelFilters()">
+                            <option value="">全部数据集</option>
+                        </select>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">翻译来源筛选</label>
+                        <select class="form-select form-select-sm" id="dataset-label-source-filter" onchange="applyDatasetLabelFilters()">
+                            <option value="">全部来源</option>
+                            <option value="Database">Database</option>
+                            <option value="user">用户</option>
+                        </select>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">关键词搜索</label>
+                        <input type="text" class="form-control form-control-sm" id="dataset-label-search-input" 
+                               placeholder="搜索原始标签或翻译标签" onkeyup="applyDatasetLabelFilters()">
+                    </div>
+                </div>
+                <div class="table-responsive">
+                    <table class="table table-striped table-hover" id="dataset-label-table">
+                        <thead class="table-dark">
+                            <tr>
+                                <th style="width: 15%;">数据集</th>
+                                <th style="width: 25%;">原始标签</th>
+                                <th style="width: 50%;">翻译标签</th>
+                                <th style="width: 10%;">翻译来源</th>
+                            </tr>
+                        </thead>
+                        <tbody id="dataset-label-tbody">
+    `;
+    
+    if (datasetItems.length === 0) {
+        html += `
+            <tr>
+                <td colspan="4" class="text-center text-muted py-4">
+                    <i class="fas fa-info-circle me-2"></i>
+                    暂无数据集标签数据
+                </td>
+            </tr>
+        `;
+    } else {
+        datasetItems.forEach((item, index) => {
+            html += `
+                <tr data-item-index="${index}">
+                    <td><code>${item.dataset}</code></td>
+                    <td>${item.original_label || ''}</td>
+                    <td>
+                        <input type="text" 
+                               class="form-control form-control-sm editable-translation" 
+                               value="${item.translated_label || ''}" 
+                               data-original-value="${item.translated_label || ''}"
+                               data-item-index="${index}"
+                               placeholder="输入翻译标签">
+                    </td>
+                    <td>
+                        <span class="badge ${item.translation_source === 'user' ? 'bg-success' : 'bg-primary'}" 
+                              data-item-index="${index}">
+                            ${item.translation_source || 'Database'}
+                        </span>
+                    </td>
+                </tr>
+            `;
+        });
+    }
+    
+    html += `
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    `;
+    
+    // 添加分页控件
+    if (data.pagination) {
+        html += generatePreviewPaginationControls(data.pagination, 'dataset');
+    }
+    
+    container.innerHTML = html;
+    
+    // 保存原始数据用于筛选
+    window.datasetLabelOriginalData = datasetItems;
+    
+    // 初始化筛选选项
+    initializeDatasetLabelFilters(datasetItems);
+}
+
+// 初始化数据集标签筛选选项
+function initializeDatasetLabelFilters(data) {
+    const datasetFilter = document.getElementById('dataset-label-dataset-filter');
+    
+    if (!datasetFilter) return;
+    
+    // 获取唯一的数据集
+    const datasets = [...new Set(data.map(item => item.dataset))].sort();
+    
+    // 填充数据集筛选选项
+    datasetFilter.innerHTML = '<option value="">全部数据集</option>';
+    datasets.forEach(dataset => {
+        datasetFilter.innerHTML += `<option value="${dataset}">${dataset}</option>`;
+    });
+}
+
+// 应用数据集标签筛选
+function applyDatasetLabelFilters() {
+    const datasetFilter = document.getElementById('dataset-label-dataset-filter');
+    const sourceFilter = document.getElementById('dataset-label-source-filter');
+    const searchInput = document.getElementById('dataset-label-search-input');
+    const tbody = document.getElementById('dataset-label-tbody');
+    
+    if (!datasetFilter || !sourceFilter || !searchInput || !tbody) return;
+    
+    const datasetValue = datasetFilter.value;
+    const sourceValue = sourceFilter.value;
+    const searchValue = searchInput.value.toLowerCase();
+    
+    // 筛选数据
+    let filteredData = window.datasetLabelOriginalData || [];
+    
+    if (datasetValue) {
+        filteredData = filteredData.filter(item => item.dataset === datasetValue);
+    }
+    
+    if (sourceValue) {
+        filteredData = filteredData.filter(item => (item.translation_source || 'Database') === sourceValue);
+    }
+    
+    if (searchValue) {
+        filteredData = filteredData.filter(item => 
+            (item.original_label && item.original_label.toLowerCase().includes(searchValue)) ||
+            (item.translated_label && item.translated_label.toLowerCase().includes(searchValue))
+        );
+    }
+    
+    // 重新渲染表格内容
+    let html = '';
+    if (filteredData.length === 0) {
+        html = `
+            <tr>
+                <td colspan="4" class="text-center text-muted py-4">
+                    <i class="fas fa-info-circle me-2"></i>
+                    没有符合筛选条件的数据
+                </td>
+            </tr>
+        `;
+    } else {
+        filteredData.forEach((item, index) => {
+            html += `
+                <tr data-item-index="${index}">
+                    <td><code>${item.dataset}</code></td>
+                    <td>${item.original_label || ''}</td>
+                    <td>
+                        <input type="text" 
+                               class="form-control form-control-sm editable-translation" 
+                               value="${item.translated_label || ''}" 
+                               data-original-value="${item.translated_label || ''}"
+                               data-item-index="${index}"
+                               placeholder="输入翻译标签">
+                    </td>
+                    <td>
+                        <span class="badge ${item.translation_source === 'user' ? 'bg-success' : 'bg-primary'}" 
+                              data-item-index="${index}">
+                            ${item.translation_source || 'Database'}
+                        </span>
+                    </td>
+                </tr>
+            `;
+        });
+    }
+    
+    tbody.innerHTML = html;
+}
+
+// 显示预览变量标签结果
+function displayPreviewVariableLabelResults(data) {
+    console.log('显示预览变量标签结果:', data);
+    
+    // 数据校验
+    if (!data) {
+        console.error('数据为空');
+        return;
+    }
+    
+    // 保存当前配置
+    currentPreviewConfig = data;
+    currentPreviewListType = 'variable';
+    
+    // 提取变量标签数据和版本信息
+    const variableData = data.variableLabel || data;
+    const meddraVersion = data.meddra_version || 'N/A';
+    const whodrugVersion = data.whodrug_version || 'N/A';
+    
+    console.log('Extracted versions:', { meddraVersion, whodrugVersion });
+    
+    // 首先切换到翻译清单预览标签页
+    const translationPreviewTab = document.querySelector('#translation-preview-tab');
+    const translationPreviewTabPane = document.getElementById('translation-preview-content');
+    
+    if (translationPreviewTab && translationPreviewTabPane) {
+        console.log('Switching to translation-preview tab...');
+        
+        // 移除所有标签页的active类
+        document.querySelectorAll('.tab-pane').forEach(pane => {
+            pane.classList.remove('show', 'active');
+        });
+        document.querySelectorAll('.nav-link').forEach(link => {
+            link.classList.remove('active');
+        });
+        
+        // 激活翻译清单预览标签页
+        translationPreviewTab.classList.add('active');
+        translationPreviewTabPane.classList.add('show', 'active');
+        
+        console.log('Tab switched successfully');
+    } else {
+        console.error('Translation preview tab not found!');
+    }
+    
+    const container = document.getElementById('previewTranslationContentArea');
+    if (!container) {
+        console.error('未找到预览结果容器');
+        return;
+    }
+    
+    const variableItems = data.variableLabel?.data || data.data || [];
+    const summary = data.variableLabel?.summary || data.summary || {};
+    
+    console.log('Variable items found:', variableItems.length);
+    console.log('First few variable items:', variableItems.slice(0, 3));
+    
+    let html = `
+        <div class="card">
+            <div class="card-header">
+                <h5 class="mb-0">变量标签预览 (${variableItems.length} 项)</h5>
+                <small class="text-muted">仅显示数据库匹配结果，不执行AI翻译</small>
+            </div>
+            <div class="card-body">
+                <!-- 筛选控件 -->
+                <div class="row mb-3">
+                    <div class="col-md-3">
+                        <label class="form-label">数据集筛选</label>
+                        <select class="form-select form-select-sm" id="variable-label-dataset-filter" onchange="applyVariableLabelFilters()">
+                            <option value="">全部数据集</option>
+                        </select>
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label">变量筛选</label>
+                        <select class="form-select form-select-sm" id="variable-label-variable-filter" onchange="applyVariableLabelFilters()">
+                            <option value="">全部变量</option>
+                        </select>
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label">翻译来源筛选</label>
+                        <select class="form-select form-select-sm" id="variable-label-source-filter" onchange="applyVariableLabelFilters()">
+                            <option value="">全部来源</option>
+                            <option value="Database">Database</option>
+                            <option value="user">用户</option>
+                        </select>
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label">关键词搜索</label>
+                        <input type="text" class="form-control form-control-sm" id="variable-label-search-input" 
+                               placeholder="搜索原始标签或翻译标签" onkeyup="applyVariableLabelFilters()">
+                    </div>
+                </div>
+                <div class="table-responsive">
+                    <table class="table table-striped table-hover" id="variable-label-table">
+                        <thead class="table-dark">
+                            <tr>
+                                <th style="width: 12%;">数据集</th>
+                                <th style="width: 15%;">变量</th>
+                                <th style="width: 23%;">原始标签</th>
+                                <th style="width: 40%;">翻译标签</th>
+                                <th style="width: 10%;">翻译来源</th>
+                            </tr>
+                        </thead>
+                        <tbody id="variable-label-tbody">
+    `;
+    
+    if (variableItems.length === 0) {
+        html += `
+            <tr>
+                <td colspan="5" class="text-center text-muted py-4">
+                    <i class="fas fa-info-circle me-2"></i>
+                    暂无变量标签数据
+                </td>
+            </tr>
+        `;
+    } else {
+        variableItems.forEach((item, index) => {
+            html += `
+                <tr data-item-index="${index}">
+                    <td><code>${item.dataset}</code></td>
+                    <td><code>${item.variable}</code></td>
+                    <td>${item.original_label || ''}</td>
+                    <td>
+                        <input type="text" 
+                               class="form-control form-control-sm editable-translation" 
+                               value="${item.translated_label || ''}" 
+                               data-original-value="${item.translated_label || ''}"
+                               data-item-index="${index}"
+                               placeholder="输入翻译标签">
+                    </td>
+                    <td>
+                        <span class="badge ${item.translation_source === 'user' ? 'bg-success' : 'bg-primary'}" 
+                              data-item-index="${index}">
+                            ${item.translation_source || 'Database'}
+                        </span>
+                    </td>
+                </tr>
+            `;
+        });
+    }
+    
+    html += `
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    `;
+    
+    // 添加分页控件
+    if (data.pagination) {
+        html += generatePreviewPaginationControls(data.pagination, 'variable');
+    }
+    
+    container.innerHTML = html;
+    
+    // 保存原始数据用于筛选
+    window.variableLabelOriginalData = variableItems;
+    
+    // 初始化筛选选项
+    initializeVariableLabelFilters(variableItems);
+}
+
+// 初始化变量标签筛选选项
+function initializeVariableLabelFilters(data) {
+    const datasetFilter = document.getElementById('variable-label-dataset-filter');
+    const variableFilter = document.getElementById('variable-label-variable-filter');
+    
+    if (!datasetFilter || !variableFilter) return;
+    
+    // 获取唯一的数据集和变量
+    const datasets = [...new Set(data.map(item => item.dataset))].sort();
+    const variables = [...new Set(data.map(item => item.variable))].sort();
+    
+    // 填充数据集筛选选项
+    datasetFilter.innerHTML = '<option value="">全部数据集</option>';
+    datasets.forEach(dataset => {
+        datasetFilter.innerHTML += `<option value="${dataset}">${dataset}</option>`;
+    });
+    
+    // 填充变量筛选选项
+    variableFilter.innerHTML = '<option value="">全部变量</option>';
+    variables.forEach(variable => {
+        variableFilter.innerHTML += `<option value="${variable}">${variable}</option>`;
+    });
+}
+
+// 应用变量标签筛选
+function applyVariableLabelFilters() {
+    const datasetFilter = document.getElementById('variable-label-dataset-filter');
+    const variableFilter = document.getElementById('variable-label-variable-filter');
+    const sourceFilter = document.getElementById('variable-label-source-filter');
+    const searchInput = document.getElementById('variable-label-search-input');
+    const tbody = document.getElementById('variable-label-tbody');
+    
+    if (!datasetFilter || !variableFilter || !sourceFilter || !searchInput || !tbody) return;
+    
+    const datasetValue = datasetFilter.value;
+    const variableValue = variableFilter.value;
+    const sourceValue = sourceFilter.value;
+    const searchValue = searchInput.value.toLowerCase();
+    
+    // 筛选数据
+    let filteredData = window.variableLabelOriginalData || [];
+    
+    if (datasetValue) {
+        filteredData = filteredData.filter(item => item.dataset === datasetValue);
+    }
+    
+    if (variableValue) {
+        filteredData = filteredData.filter(item => item.variable === variableValue);
+    }
+    
+    if (sourceValue) {
+        filteredData = filteredData.filter(item => (item.translation_source || 'Database') === sourceValue);
+    }
+    
+    if (searchValue) {
+        filteredData = filteredData.filter(item => 
+            (item.original_label && item.original_label.toLowerCase().includes(searchValue)) ||
+            (item.translated_label && item.translated_label.toLowerCase().includes(searchValue))
+        );
+    }
+    
+    // 重新渲染表格内容
+    let html = '';
+    if (filteredData.length === 0) {
+        html = `
+            <tr>
+                <td colspan="5" class="text-center text-muted py-4">
+                    <i class="fas fa-info-circle me-2"></i>
+                    没有符合筛选条件的数据
+                </td>
+            </tr>
+        `;
+    } else {
+        filteredData.forEach((item, index) => {
+            html += `
+                <tr data-item-index="${index}">
+                    <td><code>${item.dataset}</code></td>
+                    <td><code>${item.variable}</code></td>
+                    <td>${item.original_label || ''}</td>
+                    <td>
+                        <input type="text" 
+                               class="form-control form-control-sm editable-translation" 
+                               value="${item.translated_label || ''}" 
+                               data-original-value="${item.translated_label || ''}"
+                               data-item-index="${index}"
+                               placeholder="输入翻译标签">
+                    </td>
+                    <td>
+                        <span class="badge ${item.translation_source === 'user' ? 'bg-success' : 'bg-primary'}" 
+                              data-item-index="${index}">
+                            ${item.translation_source || 'Database'}
+                        </span>
+                    </td>
+                </tr>
+            `;
+        });
+    }
+    
+    tbody.innerHTML = html;
+}
+
+// 显示AI翻译非编码清单结果（AI项排序靠前，含翻译执行、确认等功能）
+function displayAITranslationUncodedListResults(data) {
+    console.log('显示AI翻译非编码清单结果:', data);
+    
+    const container = document.getElementById('aiTranslationContentArea');
+    if (!container) {
+        console.error('未找到AI翻译结果容器');
+        return;
+    }
+    
+    const uncodedItems = data.uncoded_items || [];
+    const pagination = data.pagination || {};
+    
+    // 将AI翻译的项目排序到前面
+    const sortedItems = [...uncodedItems].sort((a, b) => {
+        if (a.translation_source === 'AI' && b.translation_source !== 'AI') return -1;
+        if (a.translation_source !== 'AI' && b.translation_source === 'AI') return 1;
+        return 0;
+    });
+    
+    let html = `
+        <div class="card">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <div>
+                    <h5 class="mb-0">AI翻译非编码清单</h5>
+                    <small class="text-muted">AI翻译项优先显示 | 总计: ${pagination.total_count || 0} 项</small>
+                </div>
+                <div class="btn-group" role="group">
+                    <button class="btn btn-success btn-sm" onclick="executeAITranslation('uncoded')">
+                        <i class="fas fa-robot"></i> 执行AI翻译
+                    </button>
+                    <button class="btn btn-primary btn-sm" onclick="confirmAllTranslations('uncoded')">
+                        <i class="fas fa-check-double"></i> 批量确认
+                    </button>
+                </div>
+            </div>
+            <div class="card-body">
+                <div class="table-responsive">
+                    <table class="table table-striped table-hover">
+                        <thead class="table-dark">
+                            <tr>
+                                <th>数据集</th>
+                                <th>变量</th>
+                                <th>原始值</th>
+                                <th>翻译值</th>
+                                <th>翻译来源</th>
+                                <th>需要确认</th>
+                                <th>操作</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+    `;
+    
+    sortedItems.forEach((item, index) => {
+        const needsConfirmation = item.needs_confirmation === 'Y';
+        const isAITranslation = item.translation_source === 'AI';
+        const isMetadataMultiple = item.translation_source === 'metadata_multiple';
+        const hasHighlight = item.highlight === true;
+        const isEmpty = !item.translated_value || item.translated_value.trim() === '';
+        
+        let rowClass = '';
+        if (hasHighlight) {
+            rowClass = 'table-danger';
+        } else if (isEmpty && isAITranslation) {
+            rowClass = 'table-warning';  // AI翻译但值为空
+        } else if (isAITranslation) {
+            rowClass = 'table-success';  // AI翻译且有值
+        }
+        
+        html += `
+            <tr class="${rowClass}">
+                <td>${item.dataset}</td>
+                <td><code>${item.variable}</code></td>
+                <td>${item.value}</td>
+                <td>
+                    <input type="text" class="form-control form-control-sm" 
+                           value="${item.translated_value || ''}" 
+                           data-index="${index}" 
+                           ${isAITranslation ? 'style="border-color: #28a745;"' : ''}
+                           ${isEmpty ? 'placeholder="等待AI翻译..."' : ''}>
+                    ${isEmpty && isAITranslation ? '<small class="text-warning">AI翻译值为空，需要重新翻译</small>' : ''}
+                </td>
+                <td>
+                    <span class="badge ${isAITranslation ? 'bg-success' : isMetadataMultiple ? 'bg-warning' : 'bg-info'}">
+                        ${item.translation_source === 'metadata_multiple' ? 'Metadata(多个)' : item.translation_source}
+                    </span>
+                </td>
+                <td>
+                    <span class="badge ${needsConfirmation ? 'bg-warning' : 'bg-success'}">
+                        ${needsConfirmation ? '需要确认' : '已确认'}
+                    </span>
+                </td>
+                <td>
+                    <div class="btn-group btn-group-sm" role="group">
+                        ${isAITranslation && isEmpty ? 
+                            `<button class="btn btn-outline-success" onclick="retryAITranslation(${index}, 'uncoded')">
+                                <i class="fas fa-redo"></i> 重试
+                            </button>` : ''
+                        }
+                        <button class="btn btn-outline-primary" onclick="confirmTranslation(${index}, 'uncoded')">
+                            <i class="fas fa-check"></i> 确认
+                        </button>
+                    </div>
                 </td>
             </tr>
         `;
@@ -4655,4 +6983,304 @@ function confirmTranslation(index, type) {
     console.log(`确认翻译: 索引${index}, 类型${type}`);
     // TODO: 实现翻译确认逻辑
     showAlert('翻译已确认', 'success');
+}
+
+// 真实进度轮询函数
+async function pollProgress(taskId) {
+    const maxAttempts = 300; // 最多轮询5分钟
+    let attempts = 0;
+    
+    return new Promise((resolve, reject) => {
+        const poll = async () => {
+            try {
+                attempts++;
+                const response = await fetch(`/api/progress/${taskId}`);
+                
+                if (!response.ok) {
+                    if (response.status === 404) {
+                        // 任务不存在，可能已完成并被清理
+                        resolve();
+                        return;
+                    }
+                    throw new Error(`HTTP ${response.status}`);
+                }
+                
+                const progressData = await response.json();
+                
+                // 更新进度条
+                updateLoadingProgress(progressData.progress, progressData.message);
+                
+                // 检查任务状态
+                if (progressData.status === 'completed') {
+                    resolve();
+                    return;
+                } else if (progressData.status === 'failed') {
+                    reject(new Error(progressData.message));
+                    return;
+                } else if (attempts >= maxAttempts) {
+                    reject(new Error('进度轮询超时'));
+                    return;
+                }
+                
+                // 继续轮询
+                setTimeout(poll, 1000); // 每秒轮询一次
+                
+            } catch (error) {
+                console.error('进度轮询错误:', error);
+                if (attempts >= maxAttempts) {
+                    reject(error);
+                } else {
+                    // 继续尝试
+                    setTimeout(poll, 2000); // 出错时延长间隔
+                }
+            }
+        };
+        
+        poll();
+    });
+}
+
+// 分页相关全局变量
+let currentPreviewConfig = null;
+let currentPreviewPageSize = 100;
+let currentPreviewListType = null;
+
+// 加载预览清单的指定页
+async function loadPreviewPage(page, listType) {
+    if (!currentPreviewConfig || page < 1) {
+        return;
+    }
+    
+    try {
+        showLoadingOverlay(`正在加载第${page}页...`, '加载中', 50);
+        
+        let data;
+        switch (listType) {
+            case 'coded':
+                data = await generateCodedListPreviewData(currentPreviewConfig, page, currentPreviewPageSize);
+                displayPreviewCodedListResults(data);
+                break;
+            case 'uncoded':
+                data = await generateUncodedListPreviewData(currentPreviewConfig, page, currentPreviewPageSize);
+                displayPreviewUncodedListResults(data);
+                break;
+            case 'dataset':
+                data = await generateDatasetLabelPreviewData(currentPreviewConfig, page, currentPreviewPageSize);
+                displayPreviewDatasetLabelResults(data);
+                break;
+            case 'variable':
+                data = await generateVariableLabelPreviewData(currentPreviewConfig, page, currentPreviewPageSize);
+                displayPreviewVariableLabelResults(data);
+                break;
+        }
+        
+        hideLoadingOverlay();
+    } catch (error) {
+        console.error('加载预览页面失败:', error);
+        showAlert('加载失败: ' + error.message, 'error');
+        hideLoadingOverlay();
+    }
+}
+
+// 改变预览清单每页大小
+async function changePreviewPageSize(pageSize, listType) {
+    if (!currentPreviewConfig) {
+        return;
+    }
+    
+    currentPreviewPageSize = parseInt(pageSize);
+    
+    try {
+        showLoadingOverlay('正在重新加载...', '加载中', 50);
+        await loadPreviewPage(1, listType);
+        hideLoadingOverlay();
+    } catch (error) {
+        console.error('改变页面大小失败:', error);
+        showAlert('加载失败: ' + error.message, 'error');
+        hideLoadingOverlay();
+    }
+}
+
+// 加载未编码清单的指定页
+async function loadUncodedListPage(page) {
+    if (!currentUncodedListConfig || page < 1) {
+        return;
+    }
+    
+    try {
+        showLoadingOverlay('正在加载第' + page + '页...', '加载中', 50);
+        
+        const data = await generateUncodedListData(currentUncodedListConfig, page, currentUncodedListPageSize);
+        displayUncodedListResults(data);
+        
+        hideLoadingOverlay();
+    } catch (error) {
+        console.error('加载未编码清单页面失败:', error);
+        showAlert('加载失败: ' + error.message, 'error');
+        hideLoadingOverlay();
+    }
+}
+
+// 改变未编码清单每页大小
+async function changeUncodedListPageSize(pageSize) {
+    if (!currentUncodedListConfig) {
+        return;
+    }
+    
+    currentUncodedListPageSize = parseInt(pageSize);
+    
+    try {
+        showLoadingOverlay('正在重新加载...', '加载中', 50);
+        
+        const data = await generateUncodedListData(currentUncodedListConfig, 1, currentUncodedListPageSize);
+        displayUncodedListResults(data);
+        
+        hideLoadingOverlay();
+    } catch (error) {
+        console.error('改变页面大小失败:', error);
+        showAlert('加载失败: ' + error.message, 'error');
+        hideLoadingOverlay();
+    }
+}
+
+// AI翻译相关函数
+async function executeAITranslation(listType) {
+    console.log('执行AI翻译:', listType);
+    
+    try {
+        showLoadingOverlay('正在执行AI翻译...', 'AI翻译中', 70);
+        
+        const response = await fetch('/api/execute_ai_translation', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                list_type: listType,
+                config_id: getCurrentConfigId()
+            })
+        });
+        
+        if (!response.ok) {
+            throw new Error(`AI翻译失败: ${response.status}`);
+        }
+        
+        const result = await response.json();
+        
+        if (result.success) {
+            showAlert('AI翻译执行成功！', 'success');
+            // 重新加载当前列表
+            if (listType === 'coded') {
+                switchToAITranslationList('coded');
+            } else if (listType === 'uncoded') {
+                switchToAITranslationList('uncoded');
+            }
+        } else {
+            throw new Error(result.message || 'AI翻译执行失败');
+        }
+        
+        hideLoadingOverlay();
+    } catch (error) {
+        console.error('AI翻译执行失败:', error);
+        showAlert('AI翻译执行失败: ' + error.message, 'error');
+        hideLoadingOverlay();
+    }
+}
+
+async function confirmAllTranslations(listType) {
+    console.log('批量确认翻译:', listType);
+    
+    if (!confirm('确定要批量确认所有翻译吗？此操作不可撤销。')) {
+        return;
+    }
+    
+    try {
+        showLoadingOverlay('正在批量确认...', '确认中', 60);
+        
+        const response = await fetch('/api/confirm_all_translations', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                list_type: listType,
+                config_id: getCurrentConfigId()
+            })
+        });
+        
+        if (!response.ok) {
+            throw new Error(`批量确认失败: ${response.status}`);
+        }
+        
+        const result = await response.json();
+        
+        if (result.success) {
+            showAlert(`成功确认 ${result.confirmed_count} 项翻译！`, 'success');
+            // 重新加载当前列表
+            if (listType === 'coded') {
+                switchToAITranslationList('coded');
+            } else if (listType === 'uncoded') {
+                switchToAITranslationList('uncoded');
+            }
+        } else {
+            throw new Error(result.message || '批量确认失败');
+        }
+        
+        hideLoadingOverlay();
+    } catch (error) {
+        console.error('批量确认失败:', error);
+        showAlert('批量确认失败: ' + error.message, 'error');
+        hideLoadingOverlay();
+    }
+}
+
+async function retryAITranslation(index, listType) {
+    console.log('重试AI翻译:', index, listType);
+    
+    try {
+        showLoadingOverlay('正在重试AI翻译...', '重试中', 50);
+        
+        const response = await fetch('/api/retry_ai_translation', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                index: index,
+                list_type: listType,
+                config_id: getCurrentConfigId()
+            })
+        });
+        
+        if (!response.ok) {
+            throw new Error(`重试AI翻译失败: ${response.status}`);
+        }
+        
+        const result = await response.json();
+        
+        if (result.success) {
+            showAlert('AI翻译重试成功！', 'success');
+            // 重新加载当前列表
+            if (listType === 'coded') {
+                switchToAITranslationList('coded');
+            } else if (listType === 'uncoded') {
+                switchToAITranslationList('uncoded');
+            }
+        } else {
+            throw new Error(result.message || 'AI翻译重试失败');
+        }
+        
+        hideLoadingOverlay();
+    } catch (error) {
+        console.error('AI翻译重试失败:', error);
+        showAlert('AI翻译重试失败: ' + error.message, 'error');
+        hideLoadingOverlay();
+    }
+}
+
+// 获取当前配置ID的辅助函数
+function getCurrentConfigId() {
+    // 从sessionStorage或其他地方获取当前配置ID
+    const config = JSON.parse(sessionStorage.getItem('mergedConfig') || '{}');
+    return config.config_id || null;
 }
