@@ -1,0 +1,70 @@
+/* 可调整列宽的表格样式 */
+.resizable-table {
+    table-layout: fixed;
+    border-collapse: collapse;
+}
+
+.resizable-table th {
+    position: relative;
+    user-select: none;
+}
+
+.resize-handle {
+    position: absolute;
+    top: 0;
+    right: 0;
+    width: 5px;
+    height: 100%;
+    cursor: col-resize;
+    background: transparent;
+    z-index: 1;
+}
+
+.resize-handle:hover {
+    background: rgba(255, 255, 255, 0.3);
+}
+
+.resizable-table th:hover .resize-handle {
+    background: rgba(255, 255, 255, 0.2);
+}
+
+/* 表格单元格内容换行 */
+.resizable-table td {
+    word-wrap: break-word;
+    white-space: normal;
+    overflow-wrap: break-word;
+    vertical-align: top;
+    padding: 8px;
+}
+
+/* 原始值列特殊样式 */
+.resizable-table td.original-value {
+    max-width: 250px;
+    word-break: break-all;
+    line-height: 1.4;
+}
+
+/* 调整中的视觉反馈 */
+.resizing {
+    cursor: col-resize;
+}
+
+.resizing .resize-handle {
+    background: #007bff;
+}
+
+/* 表格响应式容器 */
+.table-responsive {
+    position: relative;
+}
+
+/* 固定列样式优化 */
+.resizable-table th[style*="sticky"],
+.resizable-table td[style*="sticky"] {
+    z-index: 10;
+}
+
+.resizable-table th[style*="right: 0"],
+.resizable-table td[style*="right: 0"] {
+    z-index: 11;
+}

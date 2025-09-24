@@ -91,6 +91,227 @@ const step6 = document.getElementById('step6');
 const preprocessingConfirmModal = new bootstrap.Modal(document.getElementById('preprocessingConfirmModal'));
 const mappingSaveModal = new bootstrap.Modal(document.getElementById('mappingSaveModal'));
 
+// 全局进度模态框变量
+let currentProgressModal = null;
+let currentProgressBootstrapModal = null;
+
+// 显示进度模态框
+function showProgressModal(title, message) {
+    // 如果已有模态框，先关闭
+    if (currentProgressModal && currentProgressBootstrapModal) {
+        hideProgressModal();
+    }
+    
+    // 创建新的模态框
+    currentProgressModal = document.createElement('div');
+    currentProgressModal.className = 'modal fade';
+    currentProgressModal.innerHTML = `
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content">
+                <div class="modal-body text-center">
+                    <div class="spinner-border text-primary mb-3" role="status">
+                        <span class="visually-hidden">Loading...</span>
+                    </div>
+                    <h5 id="progressModalTitle">${title}</h5>
+                    <p class="text-muted mb-0" id="progressModalMessage">${message}</p>
+                </div>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(currentProgressModal);
+    
+    currentProgressBootstrapModal = new bootstrap.Modal(currentProgressModal, {
+        backdrop: false,
+        keyboard: false
+    });
+    
+    currentProgressBootstrapModal.show();
+}
+
+// 显示进度模态框（无阴影）
+function showProgressModalNoBackdrop(title, message) {
+    // 如果已有模态框，先关闭
+    if (currentProgressModal && currentProgressBootstrapModal) {
+        hideProgressModal();
+    }
+    
+    // 创建新的模态框
+    currentProgressModal = document.createElement('div');
+    currentProgressModal.className = 'modal fade';
+    currentProgressModal.innerHTML = `
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content">
+                <div class="modal-body text-center">
+                    <div class="spinner-border text-primary mb-3" role="status">
+                        <span class="visually-hidden">Loading...</span>
+                    </div>
+                    <h5 id="progressModalTitle">${title}</h5>
+                    <p class="text-muted mb-0" id="progressModalMessage">${message}</p>
+                </div>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(currentProgressModal);
+    
+    currentProgressBootstrapModal = new bootstrap.Modal(currentProgressModal, {
+        backdrop: false,
+        keyboard: false
+    });
+    
+    currentProgressBootstrapModal.show();
+}
+
+// 隐藏进度模态框
+function hideProgressModal() {
+    if (currentProgressBootstrapModal) {
+        try {
+            currentProgressBootstrapModal.hide();
+        } catch (e) {
+            console.warn('Error hiding modal:', e);
+        }
+        
+        // 强制移除模态框
+        setTimeout(() => {
+            if (currentProgressModal && currentProgressModal.parentNode) {
+                document.body.removeChild(currentProgressModal);
+            }
+            currentProgressModal = null;
+            currentProgressBootstrapModal = null;
+            
+            // 清理可能残留的模态框背景
+            const backdrops = document.querySelectorAll('.modal-backdrop');
+            backdrops.forEach(backdrop => {
+                if (backdrop.parentNode) {
+                    backdrop.parentNode.removeChild(backdrop);
+                }
+            });
+            
+            // 恢复body的滚动
+            document.body.classList.remove('modal-open');
+            document.body.style.overflow = '';
+            document.body.style.paddingRight = '';
+        }, 300);
+    }
+}
+
+// 强制清理所有模态框和背景
+function forceCleanAllModals() {
+    // 立即清理backdrop
+    const immediateBackdrops = document.querySelectorAll('.modal-backdrop, .modal-backdrop.fade, .modal-backdrop.show, .modal-backdrop.fade.show, [class*="modal-backdrop"]');
+    immediateBackdrops.forEach(backdrop => {
+        if (backdrop.parentNode) {
+            backdrop.parentNode.removeChild(backdrop);
+        }
+    });
+    
+    // 隐藏所有Bootstrap模态框实例
+    const modals = document.querySelectorAll('.modal');
+    modals.forEach(modal => {
+        try {
+            const modalInstance = bootstrap.Modal.getInstance(modal);
+            if (modalInstance) {
+                modalInstance.hide();
+            }
+        } catch (e) {
+            console.warn('Error hiding modal instance:', e);
+        }
+    });
+    
+    // 延时强制清理
+    setTimeout(() => {
+        // 移除所有模态框元素
+        const allModals = document.querySelectorAll('.modal');
+        allModals.forEach(modal => {
+            if (modal.parentNode) {
+                modal.parentNode.removeChild(modal);
+            }
+        });
+        
+        // 移除所有背景遮罩（包括各种状态的backdrop）
+        const backdrops = document.querySelectorAll('.modal-backdrop, .modal-backdrop.fade, .modal-backdrop.show, .modal-backdrop.fade.show');
+        backdrops.forEach(backdrop => {
+            if (backdrop.parentNode) {
+                backdrop.parentNode.removeChild(backdrop);
+            }
+        });
+        
+        // 额外清理：直接查找所有包含modal-backdrop类的元素
+        const allBackdrops = document.querySelectorAll('[class*="modal-backdrop"]');
+        allBackdrops.forEach(backdrop => {
+            if (backdrop.parentNode) {
+                backdrop.parentNode.removeChild(backdrop);
+            }
+        });
+        
+        // 恢复body状态
+        document.body.classList.remove('modal-open');
+        document.body.style.overflow = '';
+        document.body.style.paddingRight = '';
+        document.body.style.marginRight = '';
+        
+        // 清理全局变量
+        currentProgressModal = null;
+        currentProgressBootstrapModal = null;
+    }, 100);
+}
+
+// 显示结果模态框
+function showResultModal(title, message, type = 'info', autoClose = true) {
+    // 先隐藏进度模态框
+    if (currentProgressBootstrapModal) {
+        hideProgressModal();
+    }
+    
+    // 创建结果模态框（仅用于错误和警告）
+    const resultModal = document.createElement('div');
+    resultModal.className = 'modal fade';
+    
+    const iconClass = {
+        'success': 'fas fa-check-circle text-success',
+        'error': 'fas fa-exclamation-circle text-danger',
+        'warning': 'fas fa-exclamation-triangle text-warning',
+        'info': 'fas fa-info-circle text-info'
+    }[type] || 'fas fa-info-circle text-info';
+    
+    resultModal.innerHTML = `
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content">
+                <div class="modal-body text-center">
+                    <i class="${iconClass} mb-3" style="font-size: 3rem;"></i>
+                    <h5>${title}</h5>
+                    <div class="text-start mt-3">
+                        <pre class="text-muted mb-0" style="white-space: pre-wrap; font-family: inherit; background: none; border: none; padding: 0;">${message}</pre>
+                    </div>
+                </div>
+                <div class="modal-footer justify-content-center">
+                    <button type="button" class="btn btn-primary" data-bs-dismiss="modal">确定</button>
+                </div>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(resultModal);
+    
+    const resultBootstrapModal = new bootstrap.Modal(resultModal, {
+        backdrop: false,
+        keyboard: false
+    });
+    resultBootstrapModal.show();
+    
+    // 自动关闭逻辑
+    if (autoClose) {
+        setTimeout(() => {
+            resultBootstrapModal.hide();
+        }, 2000); // 2秒后自动关闭
+    }
+    
+    // 清理DOM
+    resultModal.addEventListener('hidden.bs.modal', () => {
+        if (resultModal.parentNode) {
+            document.body.removeChild(resultModal);
+        }
+    });
+}
+
 // 事件监听器
 document.addEventListener('DOMContentLoaded', function() {
     initializeEventListeners();
@@ -272,6 +493,14 @@ document.getElementById('translation-confirmation-tab').addEventListener('shown.
     updateStepIndicator(5);
     initializeTranslationConfirmationPage();
 });
+
+// 翻译清单标签页事件监听器
+document.getElementById('translation-list-tab').addEventListener('shown.bs.tab', () => {
+    updateStepIndicator(6);
+    initializeTranslationListPage();
+});
+
+
 }
 
 function switchToTab(tabId) {
@@ -3061,8 +3290,38 @@ function initializeTranslationConfirmationPage() {
         return;
     }
     
+    // 设置事件监听器
+    setupTranslationConfirmationEventListeners();
+    
     // 执行合并配置表的逻辑
     executeMergeProcess();
+}
+
+// 设置翻译与确认页面的事件监听器
+function setupTranslationConfirmationEventListeners() {
+    if (translationConfirmationElements.codedListBtn) {
+        translationConfirmationElements.codedListBtn.addEventListener('click', () => {
+            generateCodedList();
+        });
+    }
+    
+    if (translationConfirmationElements.uncodedListBtn) {
+        translationConfirmationElements.uncodedListBtn.addEventListener('click', () => {
+            generateUncodedList();
+        });
+    }
+    
+    if (translationConfirmationElements.datasetLabelBtn) {
+        translationConfirmationElements.datasetLabelBtn.addEventListener('click', () => {
+            generateDatasetLabel();
+        });
+    }
+    
+    if (translationConfirmationElements.variableLabelBtn) {
+        translationConfirmationElements.variableLabelBtn.addEventListener('click', () => {
+            generateVariableLabel();
+        });
+    }
 }
 
 // 执行合并配置表的逻辑
@@ -3199,34 +3458,7 @@ function generateVariableLabelForm(mergeData, translationDirection) {
 }
  
  // 初始化翻译与确认页面（页面加载时调用）
- function initializeTranslationConfirmation() {
-    // 绑定按钮事件
-    if (translationConfirmationElements.codedListBtn) {
-        translationConfirmationElements.codedListBtn.addEventListener('click', () => {
-            generateCodedList();
-        });
-    }
-    
-    if (translationConfirmationElements.uncodedListBtn) {
-        translationConfirmationElements.uncodedListBtn.addEventListener('click', () => {
-            generateUncodedList();
-        });
-    }
-    
-    if (translationConfirmationElements.datasetLabelBtn) {
-        translationConfirmationElements.datasetLabelBtn.addEventListener('click', () => {
-            generateDatasetLabel();
-        });
-    }
-    
-    if (translationConfirmationElements.variableLabelBtn) {
-        translationConfirmationElements.variableLabelBtn.addEventListener('click', () => {
-            generateVariableLabel();
-        });
-    }
-}
-
-// 执行合并配置（在生成子页面之前）
+ // 执行合并配置（在生成子页面之前）
 async function executeMergeConfigBeforeGeneration() {
     // 如果已经执行过合并，直接返回成功
     if (isMergeExecuted) {
@@ -3299,8 +3531,6 @@ async function executeMergeConfigBeforeGeneration() {
 // 生成编码清单
 async function generateCodedList() {
     try {
-        showAlert('正在生成编码清单...', 'info');
-        
         // 获取当前配置
         const config = getCurrentTranslationConfig();
         if (!config) {
@@ -3308,11 +3538,42 @@ async function generateCodedList() {
             return;
         }
         
+        // 显示进度条
+        showTranslationProgress('正在初始化翻译请求...', 0);
+        
         // 添加项目路径参数
         const requestData = {
             ...config,
             path: lastDataPath || sessionStorage.getItem('currentPath') || ''
         };
+        
+        // 启动进度模拟（因为后端是同步处理，我们模拟渐进式进度）
+        let progressInterval;
+        let currentProgress = 5;
+        let isCompleted = false;
+        
+        progressInterval = setInterval(() => {
+            if (!isCompleted && currentProgress < 85) {
+                // 渐进式增长，越接近完成增长越慢
+                const increment = Math.max(1, (90 - currentProgress) * 0.1);
+                currentProgress += increment;
+                if (currentProgress > 85) currentProgress = 85;
+                
+                // 根据进度显示不同的消息
+                let message = '正在处理翻译请求...';
+                if (currentProgress < 20) {
+                    message = '正在加载数据集...';
+                } else if (currentProgress < 40) {
+                    message = '正在匹配数据库记录...';
+                } else if (currentProgress < 70) {
+                    message = '正在进行AI翻译...';
+                } else {
+                    message = '正在整理翻译结果...';
+                }
+                
+                updateTranslationProgress(message, Math.floor(currentProgress));
+            }
+        }, 800); // 每800ms更新一次
         
         // 调用后端API生成编码清单
         const response = await fetch('/api/generate_coded_list', {
@@ -3325,15 +3586,34 @@ async function generateCodedList() {
         
         const result = await response.json();
         
+        // 停止进度模拟
+        isCompleted = true;
+        if (progressInterval) {
+            clearInterval(progressInterval);
+        }
+        
         if (result.success) {
-            showAlert('编码清单生成成功', 'success');
-            // 显示生成的清单数据
-            displayCodedListResults(result.data);
+            // 显示完成状态
+            updateTranslationProgress('翻译完成！正在加载结果...', 100);
+            
+            // 短暂延迟后显示结果，让用户看到100%完成
+            setTimeout(() => {
+                hideTranslationProgress();
+                showAlert('编码清单生成成功', 'success');
+                // 显示生成的清单数据
+                displayCodedListResults(result.data);
+            }, 1200);
         } else {
+            hideTranslationProgress();
             showAlert(`编码清单生成失败: ${result.message}`, 'danger');
         }
     } catch (error) {
         console.error('生成编码清单时出错:', error);
+        // 停止进度模拟
+        if (typeof progressInterval !== 'undefined') {
+            clearInterval(progressInterval);
+        }
+        hideTranslationProgress();
         showAlert('生成编码清单时出错', 'danger');
     }
 }
@@ -3383,20 +3663,26 @@ async function generateUncodedList() {
 // 生成数据集Label
 async function generateDatasetLabel() {
     try {
-        showAlert('正在生成数据集Label...', 'info');
+        // 显示进度条
+        showTranslationProgress('正在初始化数据集标签翻译...', 0);
         
         // 获取当前配置
         const config = getCurrentTranslationConfig();
         if (!config) {
+            hideTranslationProgress();
             showAlert('请先完成翻译库版本控制配置', 'warning');
             return;
         }
+        
+        updateTranslationProgress('正在准备翻译请求...', 20);
         
         // 添加项目路径参数
         const requestData = {
             ...config,
             path: lastDataPath || sessionStorage.getItem('currentPath') || ''
         };
+        
+        updateTranslationProgress('正在处理数据集标签翻译...', 50);
         
         // 调用后端API生成数据集Label
         const response = await fetch('/api/generate_dataset_label', {
@@ -3407,17 +3693,27 @@ async function generateDatasetLabel() {
             body: JSON.stringify(requestData)
         });
         
+        updateTranslationProgress('正在整理翻译结果...', 80);
+        
         const result = await response.json();
         
         if (result.success) {
-            showAlert('数据集Label生成成功', 'success');
-            // 显示生成的清单数据
-            displayDatasetLabelResults(result.data);
+            updateTranslationProgress('翻译完成，正在显示结果...', 100);
+            
+            // 延迟一下再隐藏进度条，让用户看到100%
+            setTimeout(() => {
+                hideTranslationProgress();
+                showAlert('数据集Label生成成功', 'success');
+                // 显示生成的清单数据
+                displayDatasetLabelResults(result.data);
+            }, 500);
         } else {
+            hideTranslationProgress();
             showAlert(`数据集Label生成失败: ${result.message}`, 'danger');
         }
     } catch (error) {
         console.error('生成数据集Label时出错:', error);
+        hideTranslationProgress();
         showAlert('生成数据集Label时出错', 'danger');
     }
 }
@@ -3425,20 +3721,26 @@ async function generateDatasetLabel() {
 // 生成变量Label
 async function generateVariableLabel() {
     try {
-        showAlert('正在生成变量Label...', 'info');
+        // 显示进度条
+        showTranslationProgress('正在初始化变量标签翻译...', 0);
         
         // 获取当前配置
         const config = getCurrentTranslationConfig();
         if (!config) {
+            hideTranslationProgress();
             showAlert('请先完成翻译库版本控制配置', 'warning');
             return;
         }
+        
+        updateTranslationProgress('正在准备翻译请求...', 10);
         
         // 添加项目路径参数
         const requestData = {
             ...config,
             path: lastDataPath || sessionStorage.getItem('currentPath') || ''
         };
+        
+        updateTranslationProgress('正在分析变量数量...', 20);
         
         // 调用后端API生成变量Label
         const response = await fetch('/api/generate_variable_label', {
@@ -3452,14 +3754,35 @@ async function generateVariableLabel() {
         const result = await response.json();
         
         if (result.success) {
-            showAlert('变量Label生成成功', 'success');
-            // 显示生成的清单数据
-            displayVariableLabelResults(result.data);
+            // 根据实际翻译结果计算进度
+            const summary = result.data.summary;
+            const totalCount = summary.total || 0;
+            const dbMatched = summary.db_matched || 0;
+            const aiTranslated = summary.ai_translated || 0;
+            const translatedCount = dbMatched + aiTranslated;
+            
+            // 显示实际翻译进度
+            const actualProgress = totalCount > 0 ? Math.round((translatedCount / totalCount) * 100) : 100;
+            
+            updateTranslationProgress(
+                `翻译完成！数据库匹配: ${dbMatched}项，AI翻译: ${aiTranslated}项，总计: ${translatedCount}/${totalCount}项`, 
+                actualProgress
+            );
+            
+            // 延迟一下再隐藏进度条，让用户看到实际进度
+            setTimeout(() => {
+                hideTranslationProgress();
+                showAlert(`变量Label生成成功！共翻译 ${translatedCount}/${totalCount} 项 (${actualProgress}%)`, 'success');
+                // 显示生成的清单数据
+                displayVariableLabelResults(result.data);
+            }, 1000);
         } else {
+            hideTranslationProgress();
             showAlert(`变量Label生成失败: ${result.message}`, 'danger');
         }
     } catch (error) {
         console.error('生成变量Label时出错:', error);
+        hideTranslationProgress();
         showAlert('生成变量Label时出错', 'danger');
     }
 }
@@ -4004,7 +4327,7 @@ document.addEventListener('DOMContentLoaded', function() {
     // 延迟初始化，确保所有元素都已加载
     setTimeout(() => {
         initializeTranslationLibrary();
-        initializeTranslationConfirmation();
+        initializeTranslationConfirmationPage();
     }, 100);
 });
 
@@ -4021,6 +4344,81 @@ if (translationLibraryTab) {
     });
 }
 
+// 显示翻译进度条
+function showTranslationProgress(message, progress = 0) {
+    const container = document.getElementById('translationContentArea');
+    if (!container) return;
+    
+    const html = `
+        <div class="card" id="translationProgressCard">
+            <div class="card-header">
+                <h5 class="mb-0">
+                    <i class="fas fa-cog fa-spin me-2"></i>正在处理翻译请求
+                </h5>
+            </div>
+            <div class="card-body">
+                <div class="text-center mb-3">
+                    <p class="mb-2" id="progressMessage">${message}</p>
+                    <div class="progress mb-3" style="height: 25px;">
+                        <div class="progress-bar progress-bar-striped progress-bar-animated" 
+                             role="progressbar" 
+                             style="width: ${progress}%" 
+                             id="translationProgressBar">
+                            ${progress}%
+                        </div>
+                    </div>
+                    <small class="text-muted">
+                        <i class="fas fa-info-circle me-1"></i>
+                        正在匹配数据库记录和AI翻译，请耐心等待...
+                    </small>
+                </div>
+            </div>
+        </div>
+    `;
+    
+    container.innerHTML = html;
+}
+
+// 隐藏翻译进度条
+function hideTranslationProgress() {
+    const progressCard = document.getElementById('translationProgressCard');
+    if (progressCard) {
+        progressCard.remove();
+    }
+}
+
+// 更新翻译进度条
+function updateTranslationProgress(message, progress = 0) {
+    const progressMessage = document.getElementById('progressMessage');
+    const progressBar = document.getElementById('translationProgressBar');
+    
+    if (progressMessage) {
+        progressMessage.textContent = message;
+    }
+    
+    if (progressBar) {
+        progressBar.style.width = `${progress}%`;
+        progressBar.textContent = `${progress}%`;
+        
+        // 根据进度调整进度条颜色
+        progressBar.className = 'progress-bar progress-bar-striped progress-bar-animated';
+        if (progress >= 100) {
+            progressBar.classList.add('bg-success');
+        } else if (progress >= 70) {
+            progressBar.classList.add('bg-info');
+        } else if (progress >= 40) {
+            progressBar.classList.add('bg-warning');
+        }
+    }
+}
+
+// 编码清单懒加载相关变量
+let codedListData = [];
+let displayedCodedItems = [];
+let isLoadingMoreCoded = false;
+let hasMoreCodedData = true;
+const CODED_LOAD_SIZE = 100;
+
 // 显示编码清单结果
 function displayCodedListResults(data) {
     console.log('显示编码清单结果:', data);
@@ -4031,49 +4429,218 @@ function displayCodedListResults(data) {
         return;
     }
     
-    const codedItems = data.coded_items || [];
+    // 保存完整数据
+    codedListData = data.coded_items || [];
+    displayedCodedItems = [];
+    hasMoreCodedData = true;
+    isLoadingMoreCoded = false;
+    
+    const stats = data.translation_stats || {};
     
     let html = `
         <div class="card">
             <div class="card-header">
-                <h5 class="mb-0">编码清单 (${codedItems.length} 项)</h5>
+                <h5 class="mb-0">编码清单 (${codedListData.length} 项)</h5>
                 <small class="text-muted">MedDRA版本: ${data.meddra_version || 'N/A'} | WHODrug版本: ${data.whodrug_version || 'N/A'}</small>
             </div>
             <div class="card-body">
-                <div class="table-responsive">
-                    <table class="table table-striped table-hover">
-                        <thead class="table-dark">
-                            <tr>
-                                <th>数据集</th>
-                                <th>变量</th>
-                                <th>原始值</th>
-                                <th>翻译值</th>
-                                <th>翻译来源</th>
-                                <th>需要确认</th>
-                                <th>操作</th>
-                            </tr>
-                        </thead>
-                        <tbody>
+                <!-- 翻译统计信息 -->
+                <div class="row mb-3">
+                    <div class="col-md-12">
+                        <div class="alert alert-info">
+                            <h6 class="alert-heading"><i class="fas fa-chart-bar me-2"></i>翻译统计</h6>
+                            <div class="row">
+                                <div class="col-md-3">
+                                    <span class="badge bg-primary me-1">${stats.db_matched || 0}</span>
+                                    数据库匹配
+                                </div>
+                                <div class="col-md-3">
+                                    <span class="badge bg-success me-1">${stats.ai_translated || 0}</span>
+                                    AI翻译
+                                </div>
+                                <div class="col-md-3">
+                                    <span class="badge bg-warning me-1">${stats.untranslated || 0}</span>
+                                    未翻译
+                                </div>
+                                <div class="col-md-3">
+                                    <span class="badge bg-secondary me-1">${data.total_count || 0}</span>
+                                    总计
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- 懒加载表格容器 -->
+                <div class="coded-list-container" style="max-height: 600px; overflow-y: auto;">
+                    <div class="table-responsive">
+                        <table class="table table-striped table-hover">
+                            <thead class="table-dark sticky-top">
+                                <tr>
+                                    <th>数据集</th>
+                                    <th>变量</th>
+                                    <th>原始值</th>
+                                    <th>翻译值</th>
+                                    <th>翻译来源</th>
+                                    <th>需要确认</th>
+                                    <th>操作</th>
+                                </tr>
+                            </thead>
+                            <tbody id="codedListTableBody">
+                                <!-- 数据将通过懒加载动态添加 -->
+                            </tbody>
+                        </table>
+                    </div>
+                    
+                    <!-- 懒加载状态区域 -->
+                    <div class="coded-lazy-load-status">
+                        <div class="d-flex justify-content-between align-items-center flex-wrap">
+                            <div class="text-muted mb-2 mb-md-0">
+                                已显示 <span id="displayedCodedRecords">0</span> 条，共 <span id="totalCodedRecords">${codedListData.length}</span> 条记录
+                            </div>
+                            <div class="d-flex align-items-center gap-3">
+                                <div id="loadMoreCodedContainer">
+                                    <button class="btn btn-outline-primary btn-sm" id="loadMoreCodedBtn" style="display: none;">
+                                        <i class="fas fa-chevron-down me-2"></i>加载更多 (100条)
+                                    </button>
+                                </div>
+                                <div class="text-muted small">
+                                    <i class="fas fa-info-circle me-1"></i>向下滚动自动加载
+                                </div>
+                            </div>
+                        </div>
+                        <!-- 加载指示器 -->
+                        <div id="loadingCodedIndicator" class="text-center py-3" style="display: none;">
+                            <div class="spinner-border spinner-border-sm text-primary me-2" role="status">
+                                <span class="visually-hidden">Loading...</span>
+                            </div>
+                            <span class="text-muted">正在加载更多数据...</span>
+                        </div>
+                        <!-- 加载完成提示 -->
+                        <div id="loadCompleteCodedIndicator" class="text-center py-2 text-muted small" style="display: none;">
+                            <i class="fas fa-check-circle me-1"></i>所有数据已加载完成
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
     `;
     
-    codedItems.forEach((item, index) => {
+    container.innerHTML = html;
+    
+    // 设置懒加载事件监听器
+    setupCodedListLazyLoad();
+    
+    // 加载第一批数据
+    loadMoreCodedListData();
+}
+
+// 设置编码清单懒加载事件监听器
+function setupCodedListLazyLoad() {
+    const codedListContainer = document.querySelector('.coded-list-container');
+    const loadMoreBtn = document.getElementById('loadMoreCodedBtn');
+    
+    if (codedListContainer) {
+        // 滚动事件监听
+        codedListContainer.addEventListener('scroll', function() {
+            const scrollTop = this.scrollTop;
+            const scrollHeight = this.scrollHeight;
+            const clientHeight = this.clientHeight;
+            
+            // 当滚动到底部附近时自动加载更多数据
+            if (scrollTop + clientHeight >= scrollHeight - 100 && !isLoadingMoreCoded && hasMoreCodedData) {
+                loadMoreCodedListData();
+            }
+        });
+    }
+    
+    if (loadMoreBtn) {
+        loadMoreBtn.addEventListener('click', function() {
+            loadMoreCodedListData();
+        });
+    }
+}
+
+// 加载更多编码清单数据
+function loadMoreCodedListData() {
+    if (isLoadingMoreCoded || !hasMoreCodedData) {
+        return;
+    }
+    
+    isLoadingMoreCoded = true;
+    
+    // 显示加载指示器
+    const loadingIndicator = document.getElementById('loadingCodedIndicator');
+    const loadMoreBtn = document.getElementById('loadMoreCodedBtn');
+    const loadCompleteIndicator = document.getElementById('loadCompleteCodedIndicator');
+    
+    if (loadingIndicator) loadingIndicator.style.display = 'block';
+    if (loadMoreBtn) loadMoreBtn.style.display = 'none';
+    if (loadCompleteIndicator) loadCompleteIndicator.style.display = 'none';
+    
+    // 模拟异步加载
+    setTimeout(() => {
+        const startIndex = displayedCodedItems.length;
+        const endIndex = Math.min(startIndex + CODED_LOAD_SIZE, codedListData.length);
+        const newData = codedListData.slice(startIndex, endIndex);
+        
+        if (newData.length > 0) {
+            displayedCodedItems = displayedCodedItems.concat(newData);
+            appendCodedListRows(newData, startIndex);
+        }
+        
+        // 更新状态
+        hasMoreCodedData = displayedCodedItems.length < codedListData.length;
+        isLoadingMoreCoded = false;
+        
+        // 更新UI状态
+        updateCodedLazyLoadStatus();
+        
+        // 隐藏加载指示器
+        if (loadingIndicator) loadingIndicator.style.display = 'none';
+        
+        // 显示相应的状态指示器
+        if (hasMoreCodedData) {
+            if (loadMoreBtn) loadMoreBtn.style.display = 'inline-block';
+        } else {
+            if (loadCompleteIndicator) loadCompleteIndicator.style.display = 'block';
+        }
+    }, 300); // 模拟网络延迟
+}
+
+// 追加编码清单行到表格
+function appendCodedListRows(newData, startIndex) {
+    const tbody = document.getElementById('codedListTableBody');
+    if (!tbody) return;
+    
+    let html = '';
+    newData.forEach((item, index) => {
+        const globalIndex = startIndex + index;
         const needsConfirmation = item.needs_confirmation === 'Y';
-        const isAITranslation = item.translation_source === 'AI';
+        const isAITranslation = item.translation_source === 'AI' || item.translation_source === 'AI_FAILED';
+        const isDBTranslation = item.translation_source && item.translation_source.includes('MedDRA') || item.translation_source && item.translation_source.includes('WHODrug');
+        
+        // 确定翻译来源显示文本
+        let translationSourceDisplay = item.translation_source || '未翻译';
+        if (isAITranslation) {
+            translationSourceDisplay = 'AI';
+        }
         
         html += `
             <tr class="${needsConfirmation ? 'table-warning' : ''}">
                 <td>${item.dataset}</td>
                 <td><code>${item.variable}</code></td>
-                <td>${item.value}</td>
+                <td style="word-wrap: break-word; white-space: normal;">${item.value}</td>
                 <td>
                     <input type="text" class="form-control form-control-sm" 
                            value="${item.translated_value || ''}" 
-                           data-index="${index}" 
+                           data-index="${globalIndex}" 
+                           onchange="updateCodedTranslatedValue(${globalIndex}, this.value)"
                            ${isAITranslation ? 'style="border-color: #28a745;"' : ''}>
                 </td>
                 <td>
-                    <span class="badge ${isAITranslation ? 'bg-success' : 'bg-primary'}">
-                        ${item.translation_source}
+                    <span class="badge ${isAITranslation ? 'bg-success' : (isDBTranslation ? 'bg-primary' : 'bg-secondary')}">
+                        ${translationSourceDisplay}
                     </span>
                 </td>
                 <td>
@@ -4082,26 +4649,59 @@ function displayCodedListResults(data) {
                     </span>
                 </td>
                 <td>
-                    <button class="btn btn-sm btn-outline-primary" onclick="confirmTranslation(${index}, 'coded')">
-                        确认
+                    <button class="btn btn-sm btn-outline-primary" onclick="confirmCodedTranslation(${globalIndex})">
+                        <i class="fas fa-check"></i> 确认
                     </button>
                 </td>
             </tr>
         `;
     });
     
-    html += `
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-        </div>
-    `;
+    tbody.insertAdjacentHTML('beforeend', html);
+}
+
+// 更新编码清单懒加载状态显示
+function updateCodedLazyLoadStatus() {
+    const displayedRecordsSpan = document.getElementById('displayedCodedRecords');
+    const totalRecordsSpan = document.getElementById('totalCodedRecords');
     
-    container.innerHTML = html;
+    if (displayedRecordsSpan) {
+        displayedRecordsSpan.textContent = displayedCodedItems.length;
+    }
+    
+    if (totalRecordsSpan) {
+        totalRecordsSpan.textContent = codedListData.length;
+    }
+}
+
+// 更新编码清单翻译值
+function updateCodedTranslatedValue(index, value) {
+    if (displayedCodedItems[index]) {
+        displayedCodedItems[index].translated_value = value;
+        // 同时更新原始数据
+        if (codedListData[index]) {
+            codedListData[index].translated_value = value;
+        }
+    }
+}
+
+// 确认编码清单翻译
+function confirmCodedTranslation(index) {
+    if (displayedCodedItems[index]) {
+        // 这里可以添加确认翻译的逻辑
+        console.log('确认翻译:', displayedCodedItems[index]);
+        showAlert('翻译已确认', 'success');
+    }
 }
 
 // 显示非编码清单结果
+// 非编码清单懒加载相关变量
+let uncodedListData = [];
+let displayedUncodedItems = [];
+let isLoadingMoreUncoded = false;
+let hasMoreUncodedData = true;
+const UNCODED_LOAD_SIZE = 100;
+
 function displayUncodedListResults(data) {
     console.log('显示非编码清单结果:', data);
     
@@ -4111,32 +4711,164 @@ function displayUncodedListResults(data) {
         return;
     }
     
-    const uncodedItems = data.uncoded_items || [];
+    // 保存完整数据
+    uncodedListData = data.uncoded_items || [];
+    displayedUncodedItems = [];
+    hasMoreUncodedData = true;
+    isLoadingMoreUncoded = false;
     
     let html = `
         <div class="card">
             <div class="card-header">
-                <h5 class="mb-0">非编码清单 (${uncodedItems.length} 项)</h5>
+                <h5 class="mb-0">非编码清单 (${uncodedListData.length} 项)</h5>
                 <small class="text-muted">使用metadata和AI翻译</small>
             </div>
             <div class="card-body">
-                <div class="table-responsive">
-                    <table class="table table-striped table-hover">
-                        <thead class="table-dark">
-                            <tr>
-                                <th>数据集</th>
-                                <th>变量</th>
-                                <th>原始值</th>
-                                <th>翻译值</th>
-                                <th>翻译来源</th>
-                                <th>需要确认</th>
-                                <th>操作</th>
-                            </tr>
-                        </thead>
-                        <tbody>
+                <!-- 懒加载表格容器 -->
+                <div class="uncoded-list-container" style="max-height: 600px; overflow-y: auto;">
+                    <div class="table-responsive">
+                        <table class="table table-striped table-hover">
+                            <thead class="table-dark sticky-top">
+                                <tr>
+                                    <th>数据集</th>
+                                    <th>变量</th>
+                                    <th>原始值</th>
+                                    <th>翻译值</th>
+                                    <th>翻译来源</th>
+                                    <th>需要确认</th>
+                                    <th>操作</th>
+                                </tr>
+                            </thead>
+                            <tbody id="uncodedListTableBody">
+                                <!-- 数据将通过懒加载动态添加 -->
+                            </tbody>
+                        </table>
+                    </div>
+                    
+                    <!-- 懒加载状态区域 -->
+                    <div class="uncoded-lazy-load-status">
+                        <div class="d-flex justify-content-between align-items-center flex-wrap">
+                            <div class="text-muted mb-2 mb-md-0">
+                                已显示 <span id="displayedUncodedRecords">0</span> 条，共 <span id="totalUncodedRecords">${uncodedListData.length}</span> 条记录
+                            </div>
+                            <div class="d-flex align-items-center gap-3">
+                                <div id="loadMoreUncodedContainer">
+                                    <button class="btn btn-outline-primary btn-sm" id="loadMoreUncodedBtn" style="display: none;">
+                                        <i class="fas fa-chevron-down me-2"></i>加载更多 (100条)
+                                    </button>
+                                </div>
+                                <div class="text-muted small">
+                                    <i class="fas fa-info-circle me-1"></i>向下滚动自动加载
+                                </div>
+                            </div>
+                        </div>
+                        <!-- 加载指示器 -->
+                        <div id="loadingUncodedIndicator" class="text-center py-3" style="display: none;">
+                            <div class="spinner-border spinner-border-sm text-primary me-2" role="status">
+                                <span class="visually-hidden">Loading...</span>
+                            </div>
+                            <span class="text-muted">正在加载更多数据...</span>
+                        </div>
+                        <!-- 加载完成提示 -->
+                        <div id="loadCompleteUncodedIndicator" class="text-center py-2 text-muted small" style="display: none;">
+                            <i class="fas fa-check-circle me-1"></i>所有数据已加载完成
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
     `;
     
-    uncodedItems.forEach((item, index) => {
+    container.innerHTML = html;
+    
+    // 设置懒加载事件监听器
+    setupUncodedListLazyLoad();
+    
+    // 加载第一批数据
+    loadMoreUncodedListData();
+}
+
+// 设置非编码清单懒加载事件监听器
+function setupUncodedListLazyLoad() {
+    const uncodedListContainer = document.querySelector('.uncoded-list-container');
+    const loadMoreBtn = document.getElementById('loadMoreUncodedBtn');
+    
+    if (uncodedListContainer) {
+        // 滚动事件监听
+        uncodedListContainer.addEventListener('scroll', function() {
+            const scrollTop = this.scrollTop;
+            const scrollHeight = this.scrollHeight;
+            const clientHeight = this.clientHeight;
+            
+            // 当滚动到底部附近时自动加载更多数据
+            if (scrollTop + clientHeight >= scrollHeight - 100 && !isLoadingMoreUncoded && hasMoreUncodedData) {
+                loadMoreUncodedListData();
+            }
+        });
+    }
+    
+    if (loadMoreBtn) {
+        loadMoreBtn.addEventListener('click', function() {
+            loadMoreUncodedListData();
+        });
+    }
+}
+
+// 加载更多非编码清单数据
+function loadMoreUncodedListData() {
+    if (isLoadingMoreUncoded || !hasMoreUncodedData) {
+        return;
+    }
+    
+    isLoadingMoreUncoded = true;
+    
+    // 显示加载指示器
+    const loadingIndicator = document.getElementById('loadingUncodedIndicator');
+    const loadMoreBtn = document.getElementById('loadMoreUncodedBtn');
+    const loadCompleteIndicator = document.getElementById('loadCompleteUncodedIndicator');
+    
+    if (loadingIndicator) loadingIndicator.style.display = 'block';
+    if (loadMoreBtn) loadMoreBtn.style.display = 'none';
+    if (loadCompleteIndicator) loadCompleteIndicator.style.display = 'none';
+    
+    // 模拟异步加载
+    setTimeout(() => {
+        const startIndex = displayedUncodedItems.length;
+        const endIndex = Math.min(startIndex + UNCODED_LOAD_SIZE, uncodedListData.length);
+        const newData = uncodedListData.slice(startIndex, endIndex);
+        
+        if (newData.length > 0) {
+            displayedUncodedItems = displayedUncodedItems.concat(newData);
+            appendUncodedListRows(newData, startIndex);
+        }
+        
+        // 更新状态
+        hasMoreUncodedData = displayedUncodedItems.length < uncodedListData.length;
+        isLoadingMoreUncoded = false;
+        
+        // 更新UI状态
+        updateUncodedLazyLoadStatus();
+        
+        // 隐藏加载指示器
+        if (loadingIndicator) loadingIndicator.style.display = 'none';
+        
+        // 显示相应的状态指示器
+        if (hasMoreUncodedData) {
+            if (loadMoreBtn) loadMoreBtn.style.display = 'inline-block';
+        } else {
+            if (loadCompleteIndicator) loadCompleteIndicator.style.display = 'block';
+        }
+    }, 300); // 模拟网络延迟
+}
+
+// 追加非编码清单行到表格
+function appendUncodedListRows(newData, startIndex) {
+    const tbody = document.getElementById('uncodedListTableBody');
+    if (!tbody) return;
+    
+    let html = '';
+    newData.forEach((item, index) => {
+        const globalIndex = startIndex + index;
         const needsConfirmation = item.needs_confirmation === 'Y';
         const isAITranslation = item.translation_source === 'AI';
         
@@ -4144,11 +4876,12 @@ function displayUncodedListResults(data) {
             <tr class="${needsConfirmation ? 'table-warning' : ''}">
                 <td>${item.dataset}</td>
                 <td><code>${item.variable}</code></td>
-                <td>${item.value}</td>
+                <td style="word-wrap: break-word; white-space: normal;">${item.value}</td>
                 <td>
                     <input type="text" class="form-control form-control-sm" 
                            value="${item.translated_value || ''}" 
-                           data-index="${index}" 
+                           data-index="${globalIndex}" 
+                           onchange="updateUncodedTranslatedValue(${globalIndex}, this.value)"
                            ${isAITranslation ? 'style="border-color: #28a745;"' : ''}>
                 </td>
                 <td>
@@ -4162,23 +4895,49 @@ function displayUncodedListResults(data) {
                     </span>
                 </td>
                 <td>
-                    <button class="btn btn-sm btn-outline-primary" onclick="confirmTranslation(${index}, 'uncoded')">
-                        确认
+                    <button class="btn btn-sm btn-outline-primary" onclick="confirmUncodedTranslation(${globalIndex})">
+                        <i class="fas fa-check"></i> 确认
                     </button>
                 </td>
             </tr>
         `;
     });
     
-    html += `
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-        </div>
-    `;
+    tbody.insertAdjacentHTML('beforeend', html);
+}
+
+// 更新非编码清单懒加载状态显示
+function updateUncodedLazyLoadStatus() {
+    const displayedRecordsSpan = document.getElementById('displayedUncodedRecords');
+    const totalRecordsSpan = document.getElementById('totalUncodedRecords');
     
-    container.innerHTML = html;
+    if (displayedRecordsSpan) {
+        displayedRecordsSpan.textContent = displayedUncodedItems.length;
+    }
+    
+    if (totalRecordsSpan) {
+        totalRecordsSpan.textContent = uncodedListData.length;
+    }
+}
+
+// 更新非编码清单翻译值
+function updateUncodedTranslatedValue(index, value) {
+    if (displayedUncodedItems[index]) {
+        displayedUncodedItems[index].translated_value = value;
+        // 同时更新原始数据
+        if (uncodedListData[index]) {
+            uncodedListData[index].translated_value = value;
+        }
+    }
+}
+
+// 确认非编码清单翻译
+function confirmUncodedTranslation(index) {
+    if (displayedUncodedItems[index]) {
+        // 这里可以添加确认翻译的逻辑
+        console.log('确认翻译:', displayedUncodedItems[index]);
+        showAlert('翻译已确认', 'success');
+    }
 }
 
 // 显示数据集标签结果
@@ -4193,6 +4952,24 @@ function displayDatasetLabelResults(data) {
     
     const datasetLabels = data.dataset_labels || [];
     
+    // 保存数据到全局变量供保存功能使用
+    window.currentDatasetLabels = datasetLabels;
+    
+    // 对数据进行排序：AI翻译在前，数据库翻译在后
+    const sortedLabels = [...datasetLabels].sort((a, b) => {
+        // AI翻译优先级更高（排在前面）
+        if (a.translation_source === 'AI' && b.translation_source !== 'AI') return -1;
+        if (a.translation_source !== 'AI' && b.translation_source === 'AI') return 1;
+        // 如果都是AI或都不是AI，按数据集名称排序
+        return a.dataset.localeCompare(b.dataset);
+    });
+    
+    // 统计翻译汇总信息
+    const aiCount = datasetLabels.filter(item => item.translation_source === 'AI').length;
+    const dbCount = datasetLabels.filter(item => item.translation_source !== 'AI').length;
+    const needsConfirmationCount = datasetLabels.filter(item => item.needs_confirmation === 'Y').length;
+    const confirmedCount = datasetLabels.length - needsConfirmationCount;
+    
     let html = `
         <div class="card">
             <div class="card-header">
@@ -4200,6 +4977,33 @@ function displayDatasetLabelResults(data) {
                 <small class="text-muted">IG版本: ${data.ig_version || 'N/A'}</small>
             </div>
             <div class="card-body">
+                <!-- 翻译统计信息 -->
+                <div class="row mb-3">
+                    <div class="col-md-12">
+                        <div class="alert alert-info">
+                            <h6 class="alert-heading mb-2"><i class="fas fa-chart-bar me-2"></i>翻译统计</h6>
+                            <div class="row">
+                                <div class="col-md-3">
+                                    <span class="badge bg-primary me-1">${dbCount}</span>
+                                    数据库匹配
+                                </div>
+                                <div class="col-md-3">
+                                    <span class="badge bg-success me-1">${aiCount}</span>
+                                    AI翻译
+                                </div>
+                                <div class="col-md-3">
+                                    <span class="badge bg-warning me-1">${needsConfirmationCount}</span>
+                                    需要确认
+                                </div>
+                                <div class="col-md-3">
+                                    <span class="badge bg-secondary me-1">${datasetLabels.length}</span>
+                                    总计
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
                 <div class="table-responsive">
                     <table class="table table-striped table-hover">
                         <thead class="table-dark">
@@ -4215,7 +5019,7 @@ function displayDatasetLabelResults(data) {
                         <tbody>
     `;
     
-    datasetLabels.forEach((item, index) => {
+    sortedLabels.forEach((item, index) => {
         const needsConfirmation = item.needs_confirmation === 'Y';
         const isAITranslation = item.translation_source === 'AI';
         
@@ -4232,6 +5036,7 @@ function displayDatasetLabelResults(data) {
                 <td>
                     <span class="badge ${isAITranslation ? 'bg-success' : 'bg-primary'}">
                         ${item.translation_source}
+                        ${isAITranslation ? ' <i class="fas fa-robot ms-1"></i>' : ' <i class="fas fa-database ms-1"></i>'}
                     </span>
                 </td>
                 <td>
@@ -4270,14 +5075,86 @@ function displayVariableLabelResults(data) {
     }
     
     const variableLabels = data.variable_labels || [];
+    const summary = data.summary || {};
+    
+    // 保存数据到全局变量供保存功能使用
+    window.currentVariableLabels = variableLabels;
+    
+    // 对数据进行排序：AI翻译在前，数据库翻译在后
+    const sortedLabels = [...variableLabels].sort((a, b) => {
+        // AI翻译优先级更高（排在前面）
+        if (a.translation_source === 'AI' && b.translation_source !== 'AI') return -1;
+        if (a.translation_source !== 'AI' && b.translation_source === 'AI') return 1;
+        // 如果都是AI或都不是AI，按数据集名称和变量名排序
+        if (a.dataset !== b.dataset) return a.dataset.localeCompare(b.dataset);
+        return a.variable.localeCompare(b.variable);
+    });
+    
+    // 统计翻译汇总信息
+    const dbCount = summary.db_matched || 0;
+    const aiCount = summary.ai_translated || 0;
+    const untranslatedCount = summary.untranslated || 0;
+    const totalCount = summary.total || variableLabels.length;
+    const needsConfirmationCount = variableLabels.filter(item => item.needs_confirmation === 'Y').length;
+    const translatedCount = dbCount + aiCount;
+    
+    // 计算进度百分比
+    const translationProgress = totalCount > 0 ? Math.round((translatedCount / totalCount) * 100) : 0;
     
     let html = `
         <div class="card">
             <div class="card-header">
                 <h5 class="mb-0">变量标签清单 (${variableLabels.length} 项)</h5>
-                <small class="text-muted">IG版本: ${data.ig_version || 'N/A'}</small>
+                <small class="text-muted">IG版本: ${data.ig_version || 'N/A'} | 翻译方向: ${data.translation_direction || 'N/A'}</small>
             </div>
             <div class="card-body">
+                <!-- 翻译进度条 -->
+                <div class="row mb-3">
+                    <div class="col-md-12">
+                        <div class="d-flex justify-content-between align-items-center mb-2">
+                            <span class="fw-bold">翻译进度</span>
+                            <span class="badge bg-info">${translatedCount}/${totalCount} (${translationProgress}%)</span>
+                        </div>
+                        <div class="progress" style="height: 8px;">
+                            <div class="progress-bar bg-success" role="progressbar" 
+                                 style="width: ${Math.round((aiCount / totalCount) * 100)}%" 
+                                 title="AI翻译: ${aiCount}">
+                            </div>
+                            <div class="progress-bar bg-info" role="progressbar" 
+                                 style="width: ${Math.round((dbCount / totalCount) * 100)}%" 
+                                 title="数据库匹配: ${dbCount}">
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- 翻译统计信息 -->
+                <div class="row mb-3">
+                    <div class="col-md-12">
+                        <div class="alert alert-info">
+                            <h6 class="alert-heading mb-2"><i class="fas fa-chart-bar me-2"></i>翻译统计</h6>
+                            <div class="row">
+                                <div class="col-md-3">
+                                    <span class="badge bg-success me-1">${aiCount}</span>
+                                    AI翻译
+                                </div>
+                                <div class="col-md-3">
+                                    <span class="badge bg-info me-1">${dbCount}</span>
+                                    数据库匹配
+                                </div>
+                                <div class="col-md-3">
+                                    <span class="badge bg-danger me-1">${untranslatedCount}</span>
+                                    未翻译
+                                </div>
+                                <div class="col-md-3">
+                                    <span class="badge bg-warning me-1">${needsConfirmationCount}</span>
+                                    需要确认
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
                 <div class="table-responsive">
                     <table class="table table-striped table-hover">
                         <thead class="table-dark">
@@ -4294,24 +5171,27 @@ function displayVariableLabelResults(data) {
                         <tbody>
     `;
     
-    variableLabels.forEach((item, index) => {
+    sortedLabels.forEach((item, index) => {
         const needsConfirmation = item.needs_confirmation === 'Y';
         const isAITranslation = item.translation_source === 'AI';
+        const hasTranslation = item.translated_label && item.translated_label.trim() !== '';
         
         html += `
-            <tr class="${needsConfirmation ? 'table-warning' : ''}">
-                <td>${item.dataset}</td>
+            <tr class="${needsConfirmation ? 'table-warning' : ''}${!hasTranslation ? ' table-danger' : ''}">
+                <td><strong>${item.dataset}</strong></td>
                 <td><code>${item.variable}</code></td>
                 <td>${item.original_label || ''}</td>
                 <td>
                     <input type="text" class="form-control form-control-sm" 
                            value="${item.translated_label || ''}" 
                            data-index="${index}" 
-                           ${isAITranslation ? 'style="border-color: #28a745;"' : ''}>
+                           ${isAITranslation ? 'style="border-color: #28a745;"' : ''}
+                           ${!hasTranslation ? 'placeholder="未翻译"' : ''}>
                 </td>
                 <td>
-                    <span class="badge ${isAITranslation ? 'bg-success' : 'bg-primary'}">
-                        ${item.translation_source}
+                    <span class="badge ${isAITranslation ? 'bg-success' : hasTranslation ? 'bg-primary' : 'bg-secondary'}">
+                        ${item.translation_source || '未翻译'}
+                        ${isAITranslation ? ' <i class="fas fa-robot ms-1"></i>' : hasTranslation ? ' <i class="fas fa-database ms-1"></i>' : ''}
                     </span>
                 </td>
                 <td>
@@ -4344,4 +5224,1447 @@ function confirmTranslation(index, type) {
     console.log(`确认翻译: 索引${index}, 类型${type}`);
     // TODO: 实现翻译确认逻辑
     showAlert('翻译已确认', 'success');
+}
+
+// 翻译清单页面相关功能
+let translationListData = [];
+let filteredData = [];
+let selectedItems = new Set();
+
+// 懒加载相关变量
+let displayedData = [];  // 当前显示的数据
+let isLoadingMore = false;  // 是否正在加载更多数据
+let hasMoreData = true;  // 是否还有更多数据
+const LOAD_SIZE = 100;  // 每次加载的数据量
+
+// 初始化翻译清单页面
+function initializeTranslationListPage() {
+    loadTranslationResults();
+    setupTranslationListEventListeners();
+}
+
+// 设置事件监听器
+function setupTranslationListEventListeners() {
+    // 筛选输入框事件
+    document.getElementById('filterTranslationType').addEventListener('change', applyFilters);
+    document.getElementById('filterDataset').addEventListener('input', applyFilters);
+    document.getElementById('filterVariable').addEventListener('input', applyFilters);
+    document.getElementById('filterOriginalValue').addEventListener('input', applyFilters);
+    document.getElementById('filterRemark').addEventListener('input', applyFilters);
+    
+    // 批量操作按钮
+    document.getElementById('refreshBtn').addEventListener('click', refreshTranslationList);
+    document.getElementById('translationCheckBtn').addEventListener('click', performTranslationCheck);
+    document.getElementById('exportBtn').addEventListener('click', exportTranslationData);
+    document.getElementById('translateAllBtn').addEventListener('click', translateAllItems);
+    document.getElementById('confirmAllBtn').addEventListener('click', confirmAllItems);
+    document.getElementById('batchTranslateBtn').addEventListener('click', batchTranslate);
+    document.getElementById('batchConfirmBtn').addEventListener('click', batchConfirm);
+    
+    // 全选复选框
+    document.getElementById('selectAll').addEventListener('change', toggleSelectAll);
+    
+    // 移除手动加载更多按钮（改为纯滚动加载）
+    const loadMoreBtn = document.getElementById('loadMoreBtn');
+    if (loadMoreBtn) {
+        loadMoreBtn.style.display = 'none';
+    }
+    
+    // 绑定滚动事件实现懒加载
+    const tableContainer = document.querySelector('#translation-list-content .table-responsive');
+    if (tableContainer) {
+        tableContainer.addEventListener('scroll', function() {
+            const scrollTop = this.scrollTop;
+            const scrollHeight = this.scrollHeight;
+            const clientHeight = this.clientHeight;
+            
+            // 当滚动到底部附近时自动加载更多数据
+            if (scrollTop + clientHeight >= scrollHeight - 100 && !isLoadingMore && hasMoreData) {
+                loadMoreTranslationData();
+            }
+        });
+    }
+    
+    // 同时绑定窗口滚动事件作为备选方案
+    window.addEventListener('scroll', function() {
+        const scrollTop = window.pageYOffset || document.documentElement.scrollTop;
+        const scrollHeight = document.documentElement.scrollHeight;
+        const clientHeight = window.innerHeight;
+        
+        // 检查当前是否在翻译清单标签页
+        const translationTab = document.getElementById('translation-list-content');
+        if (translationTab && translationTab.classList.contains('active')) {
+            // 当滚动到底部附近时自动加载更多数据
+            if (scrollTop + clientHeight >= scrollHeight - 200 && !isLoadingMore && hasMoreData) {
+                loadMoreTranslationData();
+            }
+        }
+    });
+}
+
+// 加载翻译结果数据
+async function loadTranslationResults() {
+    try {
+        // showLoadingOverlay();
+        
+        const currentPath = getCurrentPath();
+        if (!currentPath) {
+            showAlert('请先选择项目路径', 'warning');
+            return;
+        }
+        
+        const response = await fetch(`/api/translation_results?path=${encodeURIComponent(currentPath)}&page_size=0`);
+        const result = await response.json();
+        
+        if (result.success) {
+            const data = result.data || {};
+            translationListData = data.items || [];
+            filteredData = [...translationListData];
+            
+            // 排序：未确认值在前，然后按翻译类型、数据集、变量名、原始值排序
+            filteredData.sort((a, b) => {
+                // 1. 未确认值优先
+                if (a.needs_confirmation && !b.needs_confirmation) return -1;
+                if (!a.needs_confirmation && b.needs_confirmation) return 1;
+                
+                // 2. 按翻译类型排序
+                const typeCompare = (a.translation_type || '').localeCompare(b.translation_type || '');
+                if (typeCompare !== 0) return typeCompare;
+                
+                // 3. 按数据集排序
+                const datasetCompare = (a.dataset_name || '').localeCompare(b.dataset_name || '');
+                if (datasetCompare !== 0) return datasetCompare;
+                
+                // 4. 按变量名排序
+                const variableCompare = (a.variable_name || '').localeCompare(b.variable_name || '');
+                if (variableCompare !== 0) return variableCompare;
+                
+                // 5. 按原始值排序
+                return (a.original_value || '').localeCompare(b.original_value || '');
+            });
+            
+            // 重置懒加载状态
+            displayedData = [];
+            hasMoreData = true;
+            selectedItems.clear();
+            
+            // 清空表格并初始加载第一批数据
+            const tbody = document.getElementById('translationTableBody');
+            if (tbody) {
+                tbody.innerHTML = '';
+            }
+            
+            loadMoreTranslationData();
+            
+            // 显示数据统计
+            document.getElementById('totalRecords').textContent = translationListData.length;
+        } else {
+            showAlert(result.message || '加载翻译结果失败', 'error');
+        }
+    } catch (error) {
+        console.error('Error loading translation results:', error);
+        showAlert('加载翻译结果时发生错误', 'error');
+    } finally {
+        hideLoadingOverlay();
+    }
+}
+
+// 应用筛选
+function applyFilters() {
+    const filters = {
+        translationType: document.getElementById('filterTranslationType').value,
+        dataset: document.getElementById('filterDataset').value.toLowerCase(),
+        variable: document.getElementById('filterVariable').value.toLowerCase(),
+        originalValue: document.getElementById('filterOriginalValue').value.toLowerCase(),
+        remark: document.getElementById('filterRemark').value.toLowerCase()
+    };
+    
+    filteredData = translationListData.filter(item => {
+        return (!filters.translationType || item.translation_type === filters.translationType) &&
+               (!filters.dataset || item.dataset_name.toLowerCase().includes(filters.dataset)) &&
+               (!filters.variable || item.variable_name.toLowerCase().includes(filters.variable)) &&
+               (!filters.originalValue || (item.original_value && item.original_value.toLowerCase().includes(filters.originalValue))) &&
+               (!filters.remark || (item.comments && item.comments.toLowerCase().includes(filters.remark)));
+    });
+    
+    // 排序：未确认值在前，然后按翻译类型、数据集、变量名、原始值排序
+    filteredData.sort((a, b) => {
+        // 1. 未确认值优先
+        if (a.needs_confirmation && !b.needs_confirmation) return -1;
+        if (!a.needs_confirmation && b.needs_confirmation) return 1;
+        
+        // 2. 按翻译类型排序
+        const typeCompare = (a.translation_type || '').localeCompare(b.translation_type || '');
+        if (typeCompare !== 0) return typeCompare;
+        
+        // 3. 按数据集排序
+        const datasetCompare = (a.dataset_name || '').localeCompare(b.dataset_name || '');
+        if (datasetCompare !== 0) return datasetCompare;
+        
+        // 4. 按变量名排序
+        const variableCompare = (a.variable_name || '').localeCompare(b.variable_name || '');
+        if (variableCompare !== 0) return variableCompare;
+        
+        // 5. 按原始值排序
+        return (a.original_value || '').localeCompare(b.original_value || '');
+    });
+    
+    // 重置懒加载状态
+    displayedData = [];
+    hasMoreData = true;
+    selectedItems.clear();
+    
+    // 清空表格并重新加载第一批数据
+    const tbody = document.getElementById('translationTableBody');
+    if (tbody) {
+        tbody.innerHTML = '';
+    }
+    
+    loadMoreTranslationData();
+}
+
+// 加载更多翻译数据
+function loadMoreTranslationData() {
+    if (isLoadingMore || !hasMoreData) {
+        return;
+    }
+    
+    isLoadingMore = true;
+    
+    // 显示加载指示器
+    const loadingIndicator = document.getElementById('loadingIndicator');
+    const loadCompleteIndicator = document.getElementById('loadCompleteIndicator');
+    
+    if (loadingIndicator) loadingIndicator.style.display = 'block';
+    if (loadCompleteIndicator) loadCompleteIndicator.style.display = 'none';
+    
+    // 模拟异步加载
+    setTimeout(() => {
+        const startIndex = displayedData.length;
+        const endIndex = Math.min(startIndex + LOAD_SIZE, filteredData.length);
+        const newData = filteredData.slice(startIndex, endIndex);
+        
+        if (newData.length > 0) {
+            displayedData = displayedData.concat(newData);
+            appendTranslationRows(newData, startIndex);
+        }
+        
+        // 更新状态
+        hasMoreData = displayedData.length < filteredData.length;
+        isLoadingMore = false;
+        
+        // 更新UI状态
+        updateLazyLoadStatus();
+        
+        // 隐藏加载指示器
+        if (loadingIndicator) loadingIndicator.style.display = 'none';
+        
+        // 显示相应的状态指示器
+        if (!hasMoreData) {
+            if (loadCompleteIndicator) loadCompleteIndicator.style.display = 'block';
+        }
+    }, 300); // 模拟网络延迟
+}
+
+// 追加翻译行到表格
+function appendTranslationRows(newData, startIndex) {
+    const tbody = document.getElementById('translationTableBody');
+    if (!tbody) return;
+    
+    let html = '';
+    newData.forEach((item, index) => {
+        const globalIndex = startIndex + index;
+        const isSelected = selectedItems.has(globalIndex);
+        const canEdit = item.needs_confirmation;
+        
+        const needsConfirmation = item.needs_confirmation === 1 || item.needs_confirmation === true || item.needs_confirmation === 'Y';
+        
+        html += `
+            <tr class="${needsConfirmation ? 'table-warning' : ''}">
+                <td style="position: sticky; left: 0; background-color: ${needsConfirmation ? '#fff3cd' : '#ffffff'}; z-index: 5;">
+                    ${needsConfirmation ? 
+                        `<input type="checkbox" class="form-check-input" 
+                               ${isSelected ? 'checked' : ''}
+                               onchange="toggleItemSelection(${globalIndex})">` : 
+                        '<span></span>'
+                    }
+                </td>
+                <td style="word-wrap: break-word; white-space: normal;">${item.translation_type || ''}</td>
+                <td style="word-wrap: break-word; white-space: normal;">${item.dataset_name || ''}</td>
+                <td style="word-wrap: break-word; white-space: normal;">${item.variable_name || ''}</td>
+                <td style="word-wrap: break-word; white-space: normal; overflow-wrap: break-word;">${item.original_value || ''}</td>
+                <td>
+                    ${needsConfirmation ? 
+                        `<input type="text" class="form-control form-control-sm" 
+                                id="translationInput_${globalIndex}"
+                                value="${item.translated_value || ''}" 
+                                onchange="updateTranslatedValue(${globalIndex}, this.value)">` :
+                        `<span class="text-success">${item.translated_value || ''}</span>`
+                    }
+                </td>
+                <td>
+                     <span class="badge ${getSourceBadgeClass(item.translation_source)}">
+                         ${item.translation_source || '未翻译'}
+                     </span>
+                 </td>
+                 <td style="word-wrap: break-word; white-space: normal; overflow-wrap: break-word;">
+                     <span>${item.comments || ''}</span>
+                 </td>
+                 <td style="position: sticky; right: 0; background-color: ${needsConfirmation ? '#fff3cd' : '#ffffff'}; z-index: 10000; min-width: 280px; white-space: nowrap; padding: 8px;">
+                     <div class="d-flex gap-1">
+                         ${needsConfirmation ? 
+                             `<button class="btn btn-sm btn-primary" 
+                                     onclick="translateSingle(${globalIndex})" 
+                                     title="AI翻译" style="font-size: 11px;">
+                                 <i class="fas fa-robot"></i> AI翻译
+                             </button>
+                             <button class="btn btn-sm btn-success" 
+                                     onclick="confirmTranslationItem(${globalIndex})" 
+                                     title="确认翻译" style="font-size: 11px;">
+                                 <i class="fas fa-check"></i> 确认
+                             </button>
+                             <button class="btn btn-sm btn-danger" 
+                                     onclick="deleteTranslationItem(${globalIndex})" 
+                                     title="删除记录" style="font-size: 11px;">
+                                 <i class="fas fa-trash"></i> 删除
+                             </button>` : 
+                             `<span class="badge bg-success">已确认</span>`
+                         }
+                     </div>
+                 </td>
+            </tr>
+        `;
+    });
+    
+    tbody.insertAdjacentHTML('beforeend', html);
+    
+    // 重新初始化可调整表格功能
+    if (typeof reinitializeResizableTable === 'function') {
+        setTimeout(() => {
+            reinitializeResizableTable();
+        }, 50);
+    }
+    
+    // 更新全选复选框状态
+    updateSelectAllCheckbox();
+}
+
+// 更新懒加载状态显示
+function updateLazyLoadStatus() {
+    const displayedRecordsSpan = document.getElementById('displayedRecords');
+    const totalRecordsSpan = document.getElementById('totalRecords');
+    
+    if (displayedRecordsSpan) {
+        displayedRecordsSpan.textContent = displayedData.length;
+    }
+    
+    if (totalRecordsSpan) {
+        totalRecordsSpan.textContent = filteredData.length;
+    }
+}
+
+// 更新全选复选框状态
+function updateSelectAllCheckbox() {
+    const selectAllCheckbox = document.getElementById('selectAll');
+    const confirmationItems = displayedData.filter(item => item.needs_confirmation);
+    const totalConfirmationItems = confirmationItems.length;
+    const selectedConfirmationCount = displayedData.filter((item, index) => 
+        item.needs_confirmation && selectedItems.has(index)
+    ).length;
+    
+    if (selectAllCheckbox) {
+        selectAllCheckbox.checked = totalConfirmationItems > 0 && selectedConfirmationCount === totalConfirmationItems;
+        selectAllCheckbox.indeterminate = selectedConfirmationCount > 0 && selectedConfirmationCount < totalConfirmationItems;
+    }
+}
+
+// 获取来源徽章样式
+function getSourceBadgeClass(source) {
+    if (!source || source === '未翻译') return 'bg-secondary';
+    if (source === 'AI') return 'bg-success';
+    return 'bg-primary';
+}
+
+// 渲染翻译列表（懒加载模式）
+function renderTranslationList() {
+    // 重置懒加载状态
+    displayedData = [];
+    hasMoreData = true;
+    isLoadingMore = false;
+    
+    // 清空表格
+    const tbody = document.getElementById('translationTableBody');
+    if (tbody) {
+        tbody.innerHTML = '';
+    }
+    
+    // 更新统计信息
+    updateLazyLoadStatus();
+    
+    // 加载第一批数据
+    loadMoreTranslationData();
+}
+
+// 更新懒加载状态显示
+function updateLazyLoadStatus() {
+    const displayedRecordsSpan = document.getElementById('displayedRecords');
+    const totalRecordsSpan = document.getElementById('totalRecords');
+    
+    if (displayedRecordsSpan) {
+        displayedRecordsSpan.textContent = displayedData.length;
+    }
+    
+    if (totalRecordsSpan) {
+        totalRecordsSpan.textContent = filteredData.length;
+    }
+}
+
+// 加载更多翻译数据
+function loadMoreTranslationData() {
+    if (isLoadingMore || !hasMoreData) {
+        return;
+    }
+    
+    isLoadingMore = true;
+    
+    // 显示加载指示器
+    const loadingIndicator = document.getElementById('loadingIndicator');
+    const loadCompleteIndicator = document.getElementById('loadCompleteIndicator');
+    
+    if (loadingIndicator) loadingIndicator.style.display = 'block';
+    if (loadCompleteIndicator) loadCompleteIndicator.style.display = 'none';
+    
+    // 模拟异步加载
+    setTimeout(() => {
+        const startIndex = displayedData.length;
+        const endIndex = Math.min(startIndex + LOAD_SIZE, filteredData.length);
+        const newData = filteredData.slice(startIndex, endIndex);
+        
+        if (newData.length > 0) {
+            displayedData = displayedData.concat(newData);
+            appendTranslationRows(newData, startIndex);
+        }
+        
+        // 更新状态
+        hasMoreData = displayedData.length < filteredData.length;
+        isLoadingMore = false;
+        
+        // 更新UI状态
+        updateLazyLoadStatus();
+        
+        // 隐藏加载指示器
+        if (loadingIndicator) loadingIndicator.style.display = 'none';
+        
+        // 显示相应的状态指示器
+        if (!hasMoreData) {
+            if (loadCompleteIndicator) loadCompleteIndicator.style.display = 'block';
+        }
+    }, 300); // 模拟网络延迟
+}
+
+// 追加翻译行到表格
+function appendTranslationRows(newData, startIndex) {
+    const tbody = document.getElementById('translationTableBody');
+    if (!tbody) return;
+    
+    let html = '';
+    newData.forEach((item, index) => {
+        const globalIndex = startIndex + index;
+        const isSelected = selectedItems.has(globalIndex);
+        const needsConfirmation = item.needs_confirmation === 1 || item.needs_confirmation === true || item.needs_confirmation === 'Y';
+        
+        html += `
+            <tr class="${needsConfirmation ? 'table-warning' : ''}">
+                <td style="position: sticky; left: 0; background-color: ${needsConfirmation ? '#fff3cd' : '#ffffff'}; z-index: 5;">
+                    ${needsConfirmation ? 
+                        `<input type="checkbox" class="form-check-input" 
+                               ${isSelected ? 'checked' : ''}
+                               onchange="toggleItemSelection(${globalIndex})">` : 
+                        '<span></span>'
+                    }
+                </td>
+                <td style="word-wrap: break-word; white-space: normal;">${item.translation_type || ''}</td>
+                <td style="word-wrap: break-word; white-space: normal;">${item.dataset_name || ''}</td>
+                <td style="word-wrap: break-word; white-space: normal;">${item.variable_name || ''}</td>
+                <td style="word-wrap: break-word; white-space: normal; overflow-wrap: break-word;">${item.original_value || ''}</td>
+                <td>
+                    ${needsConfirmation ? 
+                        `<input type="text" class="form-control form-control-sm" 
+                                id="translationInput_${globalIndex}"
+                                value="${item.translated_value || ''}" 
+                                onchange="updateTranslatedValue(${globalIndex}, this.value)">` :
+                        `<span class="text-success">${item.translated_value || ''}</span>`
+                    }
+                </td>
+                <td>
+                     <span class="badge ${getSourceBadgeClass(item.translation_source)}">
+                         ${item.translation_source || '未翻译'}
+                     </span>
+                 </td>
+                 <td style="word-wrap: break-word; white-space: normal; overflow-wrap: break-word;">
+                     <span>${item.comments || ''}</span>
+                 </td>
+                 <td style="position: sticky; right: 0; background-color: ${needsConfirmation ? '#fff3cd' : '#ffffff'}; z-index: 10000; min-width: 280px; white-space: nowrap; padding: 8px;">
+                     <div class="d-flex gap-1">
+                         ${needsConfirmation ? 
+                             `<button class="btn btn-sm btn-primary" 
+                                     onclick="translateSingle(${globalIndex})" 
+                                     title="AI翻译" style="font-size: 11px;">
+                                 <i class="fas fa-robot"></i> AI翻译
+                             </button>
+                             <button class="btn btn-sm btn-success" 
+                                     onclick="confirmTranslationItem(${globalIndex})" 
+                                     title="确认翻译" style="font-size: 11px;">
+                                 <i class="fas fa-check"></i> 确认
+                             </button>
+                             <button class="btn btn-sm btn-danger" 
+                                     onclick="deleteTranslationItem(${globalIndex})" 
+                                     title="删除记录" style="font-size: 11px;">
+                                 <i class="fas fa-trash"></i> 删除
+                             </button>` : 
+                             `<span class="badge bg-success">已确认</span>`
+                         }
+                     </div>
+                 </td>
+            </tr>
+        `;
+    });
+    
+    tbody.insertAdjacentHTML('beforeend', html);
+}
+
+// 切换项目选择
+function toggleItemSelection(index) {
+    if (selectedItems.has(index)) {
+        selectedItems.delete(index);
+    } else {
+        selectedItems.add(index);
+    }
+    // 只更新全选框状态，不刷新整个页面
+    updateSelectAllCheckbox();
+}
+
+// 全选/取消全选
+function toggleSelectAll() {
+    const selectAllCheckbox = document.getElementById('selectAll');
+    const startIndex = 0;
+    const endIndex = displayedData.length;
+    
+    if (selectAllCheckbox.checked) {
+        // 只选择需要确认的项目
+        for (let i = startIndex; i < endIndex; i++) {
+            if (filteredData[i] && filteredData[i].needs_confirmation) {
+                selectedItems.add(i);
+            }
+        }
+    } else {
+        // 取消选择当前页面的所有项目
+        for (let i = startIndex; i < endIndex; i++) {
+            selectedItems.delete(i);
+        }
+    }
+    
+    // 更新页面上的勾选框状态，不刷新整个页面
+    updateCheckboxStates();
+}
+
+// 更新页面上勾选框的状态
+function updateCheckboxStates() {
+    const checkboxes = document.querySelectorAll('input[type="checkbox"][onchange*="toggleItemSelection"]');
+    checkboxes.forEach((checkbox, index) => {
+        const globalIndex = index; // 根据实际的索引计算方式调整
+        checkbox.checked = selectedItems.has(globalIndex);
+    });
+}
+
+// 更新翻译值
+function updateTranslatedValue(index, value) {
+    if (index < filteredData.length) {
+        const item = filteredData[index];
+        filteredData[index].translated_value = value;
+        
+        // 调用API更新数据库
+        fetch(`/api/translation_results/${item.id}`, {
+            method: 'PUT',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                translated_value: value
+            })
+        })
+        .then(response => response.json())
+        .then(result => {
+            if (!result.success) {
+                console.error('Failed to update translated value:', result.message);
+                showAlert('更新翻译值失败: ' + result.message, 'error');
+            }
+        })
+        .catch(error => {
+            console.error('Error updating translated value:', error);
+            showAlert('更新翻译值时发生错误', 'error');
+        });
+    }
+}
+
+// 更新备注
+function updateComments(index, comments) {
+    if (index >= 0 && index < filteredData.length) {
+        const item = filteredData[index];
+        
+        // 发送PUT请求更新备注
+        fetch(`/api/translation_results/${item.id}`, {
+            method: 'PUT',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                comments: comments
+            })
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                // 更新本地数据
+                item.comments = comments;
+                showAlert('备注更新成功', 'success');
+            } else {
+                showAlert('备注更新失败: ' + data.message, 'error');
+            }
+        })
+        .catch(error => {
+            console.error('Error updating comments:', error);
+            showAlert('备注更新失败', 'error');
+        });
+    }
+}
+
+// 确认翻译项目
+async function confirmTranslationItem(index) {
+    if (index >= filteredData.length) return;
+    
+    const item = filteredData[index];
+    if (!item.needs_confirmation) {
+        showAlert('该项目已经确认', 'info');
+        return;
+    }
+    
+    // 获取当前输入框的值
+    const translationInput = document.querySelector(`input[onchange*="updateTranslatedValue(${index},"]`);
+    const currentTranslatedValue = translationInput ? translationInput.value : item.translated_value;
+    
+    try {
+        const response = await fetch(`/api/translation_results/${item.id}`, {
+            method: 'PUT',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                translated_value: currentTranslatedValue,
+                translation_source: 'AI',
+                is_confirmed: true
+            })
+        });
+        
+        const result = await response.json();
+        if (result.success) {
+            // 更新本地数据
+            item.translated_value = currentTranslatedValue;
+            item.translation_source = 'AI';
+            item.is_confirmed = true;
+            
+            // 更新当前行的翻译来源标签
+            const row = translationInput ? translationInput.closest('tr') : null;
+            if (row) {
+                const sourceBadge = row.querySelector('.badge');
+                if (sourceBadge) {
+                    sourceBadge.textContent = 'AI';
+                    sourceBadge.className = 'badge bg-success';
+                }
+            }
+            
+            // 使用模态框显示成功信息，自动关闭
+            showResultModal('确认成功', '翻译已确认并保存到数据库', 'success', true);
+        } else {
+            showAlert(result.message || '确认失败', 'error');
+        }
+    } catch (error) {
+        console.error('Confirm translation error:', error);
+        showAlert('确认翻译时发生错误', 'error');
+    }
+}
+
+// 确认单个翻译项目
+async function confirmSingle(index) {
+    if (index < 0 || index >= filteredData.length) {
+        console.warn(`索引 ${index} 超出范围`);
+        return;
+    }
+    
+    const item = filteredData[index];
+    if (!item.needs_confirmation) {
+        showAlert('该项目已经确认', 'info');
+        return;
+    }
+    
+    // 获取当前输入框的值
+    const translationInput = document.querySelector(`input[onchange*="updateTranslatedValue(${index},"]`);
+    const currentTranslatedValue = translationInput ? translationInput.value : item.translated_value;
+    
+    try {
+        const response = await fetch(`/api/translation_results/${item.id}`, {
+            method: 'PUT',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                translated_value: currentTranslatedValue,
+                translation_source: 'AI',
+                is_confirmed: true
+            })
+        });
+        
+        const result = await response.json();
+        if (result.success) {
+            // 更新本地数据
+            item.translated_value = currentTranslatedValue;
+            item.translation_source = 'AI';
+            item.is_confirmed = true;
+            
+            // 更新当前行的翻译来源标签
+            const row = translationInput ? translationInput.closest('tr') : null;
+            if (row) {
+                const sourceBadge = row.querySelector('.badge');
+                if (sourceBadge) {
+                    sourceBadge.textContent = 'AI';
+                    sourceBadge.className = 'badge bg-success';
+                }
+            }
+            
+            // 使用模态框显示成功信息，自动关闭
+            showResultModal('确认成功', '翻译已确认并保存到数据库', 'success', true);
+        } else {
+            showAlert(result.message || '确认失败', 'error');
+        }
+    } catch (error) {
+        console.error('Confirm single translation error:', error);
+        showAlert('确认翻译时发生错误', 'error');
+    }
+}
+
+// AI翻译单个项目
+// 单条AI翻译函数
+async function translateSingle(index) {
+    return await aiTranslateItem(index);
+}
+
+async function aiTranslateItem(index) {
+    // index是globalIndex，需要找到对应的filteredData索引
+    // globalIndex = startIndex + filteredDataIndex
+    // 所以 filteredDataIndex = globalIndex - startIndex
+    const startIndex = displayedData.length - Math.min(displayedData.length, filteredData.length);
+    const filteredDataIndex = index - startIndex;
+    
+    if (filteredDataIndex < 0 || filteredDataIndex >= filteredData.length) return;
+    
+    const item = filteredData[filteredDataIndex];
+    
+    // 创建翻译进度弹框
+    const modal = document.createElement('div');
+    modal.className = 'modal fade';
+    modal.innerHTML = `
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content">
+                <div class="modal-body text-center">
+                    <div class="spinner-border text-primary mb-3" role="status">
+                        <span class="visually-hidden">Loading...</span>
+                    </div>
+                    <h5>正在进行AI翻译...</h5>
+                    <p class="text-muted mb-0">请稍候，正在翻译"${item.original_value}"</p>
+                </div>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(modal);
+    
+    const bootstrapModal = new bootstrap.Modal(modal, {
+        backdrop: 'static',
+        keyboard: false
+    });
+    
+    try {
+        bootstrapModal.show();
+        
+        // 获取翻译方向
+        const translationDirection = getTranslationDirection();
+        if (!translationDirection) {
+            bootstrapModal.hide();
+            setTimeout(() => {
+                document.body.removeChild(modal);
+                showAlert('请先设置翻译方向', 'error');
+            }, 300);
+            return;
+        }
+        
+        // 根据翻译方向设置源语言和目标语言
+        let sourceLang, targetLang;
+        if (translationDirection === 'en_to_zh') {
+            sourceLang = 'en';
+            targetLang = 'zh';
+        } else if (translationDirection === 'zh_to_en') {
+            sourceLang = 'zh';
+            targetLang = 'en';
+        } else {
+            bootstrapModal.hide();
+            setTimeout(() => {
+                document.body.removeChild(modal);
+                showAlert('不支持的翻译方向', 'error');
+            }, 300);
+            return;
+        }
+        
+        // 调用AI翻译API，不保存到数据库，只获取翻译结果
+        const response = await fetch('/api/translate_text', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                record_id: item.id,
+                source_lang: sourceLang,
+                target_lang: targetLang,
+                context: 'medical',
+                save_to_db: false  // 不保存到数据库
+            })
+        });
+        
+        const result = await response.json();
+        
+        // 关闭弹框
+        bootstrapModal.hide();
+        setTimeout(() => {
+            document.body.removeChild(modal);
+        }, 300);
+        
+        if (result.success) {
+            // 通过onchange属性定位翻译输入框
+            const translationInput = document.querySelector(`input[onchange*="updateTranslatedValue(${index},"]`);
+            if (translationInput) {
+                translationInput.value = result.translated_text;
+                // 添加视觉反馈，表示这是AI翻译的结果
+                translationInput.style.backgroundColor = '#e8f5e8';
+                setTimeout(() => {
+                    translationInput.style.backgroundColor = '';
+                }, 2000);
+                
+                // 批量翻译时不触发change事件，避免保存到数据库
+            // translationInput.dispatchEvent(new Event('change', { bubbles: true }));
+            } else {
+                console.warn(`未找到onchange属性包含updateTranslatedValue(${index},的输入框`);
+            }
+            
+            // 更新翻译来源标签
+            const sourceRow = translationInput ? translationInput.closest('tr') : null;
+            if (sourceRow) {
+                const sourceBadge = sourceRow.querySelector('.badge');
+                if (sourceBadge) {
+                    sourceBadge.textContent = 'AI';
+                    sourceBadge.className = 'badge bg-success';
+                }
+            }
+            
+            // 更新本地数据，不保存到数据库
+            if (filteredDataIndex >= 0 && filteredDataIndex < filteredData.length) {
+                filteredData[filteredDataIndex].translated_value = result.translated_text;
+                filteredData[filteredDataIndex].translation_source = 'AI';
+            }
+        } else {
+            showAlert(result.message || 'AI翻译失败', 'error');
+        }
+    } catch (error) {
+        console.error('AI translation error:', error);
+        
+        // 关闭弹框
+        bootstrapModal.hide();
+        setTimeout(() => {
+            document.body.removeChild(modal);
+        }, 300);
+        
+        showAlert('AI翻译时发生错误', 'error');
+    }
+}
+
+// 删除单个项目
+async function deleteItem(index) {
+    if (index >= filteredData.length) return;
+    
+    if (!confirm('确定要删除这条翻译记录吗？')) return;
+    
+    try {
+        const item = filteredData[index];
+        // TODO: 调用删除API
+        
+        // 临时从本地数据中移除
+        filteredData.splice(index, 1);
+        translationListData = translationListData.filter(data => 
+            !(data.dataset_name === item.dataset_name && 
+              data.variable_name === item.variable_name && 
+              data.original_value === item.original_value)
+        );
+        
+        selectedItems.delete(index);
+        renderTranslationList();
+        showAlert('删除成功', 'success');
+    } catch (error) {
+        console.error('Delete error:', error);
+        showAlert('删除时发生错误', 'error');
+    }
+}
+
+// 批量AI翻译
+async function batchTranslate() {
+    if (selectedItems.size === 0) {
+        showResultModal('提示', '请先选择要翻译的项目', 'warning', false);
+        return;
+    }
+    
+    // 筛选出需要翻译的项目（needs_confirmation为true的项目）
+    const itemsToTranslate = Array.from(selectedItems).filter(index => {
+        return index < filteredData.length && filteredData[index].needs_confirmation;
+    });
+    
+    if (itemsToTranslate.length === 0) {
+        showResultModal('提示', '选中的项目中没有需要翻译的项目', 'warning', false);
+        return;
+    }
+    
+    try {
+        // 显示进度模态框
+        showProgressModal('批量AI翻译中...', `正在翻译 ${itemsToTranslate.length} 个项目，请稍候...`);
+        
+        let successCount = 0;
+        let failCount = 0;
+        
+        for (const index of itemsToTranslate) {
+            if (index < filteredData.length) {
+                try {
+                    await aiTranslateItemSilent(index); // 只返回翻译结果，不保存数据库
+                    successCount++;
+                } catch (error) {
+                    console.error(`翻译项目 ${index} 失败:`, error);
+                    failCount++;
+                }
+            }
+        }
+        
+        // 关闭进度模态框
+        hideProgressModal();
+        forceCleanAllModals();
+        
+        // 显示结果
+        showResultModal('翻译完成', `批量AI翻译完成！成功: ${successCount} 个，失败: ${failCount} 个`, 'success', true);
+    } catch (error) {
+        console.error('Batch translate error:', error);
+        hideProgressModal();
+        forceCleanAllModals();
+        showResultModal('翻译失败', '批量翻译时发生错误：' + error.message, 'error', false);
+    }
+}
+
+// 批量确认
+async function batchConfirm() {
+    if (selectedItems.size === 0) {
+        showResultModal('提示', '请先选择要确认的项目', 'warning', false);
+        return;
+    }
+    
+    // 筛选出需要确认的项目（有翻译值的项目）
+    const itemsToConfirm = Array.from(selectedItems).filter(index => {
+        return index < filteredData.length && filteredData[index].translated_value && filteredData[index].translated_value.trim();
+    });
+    
+    if (itemsToConfirm.length === 0) {
+        showResultModal('提示', '选中的项目中没有需要确认的翻译数据', 'warning', false);
+        return;
+    }
+    
+    // 构造要保存的数据
+    const itemsToSave = itemsToConfirm.map(index => {
+        const item = filteredData[index];
+        return {
+            id: item.id,
+            translated_value: item.translated_value,
+            translation_source: 'AI',
+            needs_confirmation: item.needs_confirmation // 保持原值不变
+        };
+    });
+    
+    try {
+        // showProgressModal('批量确认中...', `正在保存 ${itemsToSave.length} 个翻译结果，请稍候...`);
+        
+        const response = await fetch('/api/batch_save_translations', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                items: itemsToSave
+            })
+        });
+        
+        const result = await response.json();
+        hideProgressModal();
+        
+        if (result.success) {
+            selectedItems.clear();
+            showResultModal('确认完成', `批量确认完成，成功保存 ${itemsToSave.length} 个翻译结果`, 'success', true);
+        } else {
+            showResultModal('确认失败', result.message || '批量确认失败', 'error', false);
+        }
+        
+    } catch (error) {
+        console.error('Batch confirm error:', error);
+        hideProgressModal();
+        showResultModal('确认失败', '批量确认时发生错误：' + error.message, 'error', false);
+    }
+}
+
+// 获取当前项目路径
+function getCurrentPath() {
+    return datasetPathInput ? datasetPathInput.value : '';
+}
+
+// 刷新翻译清单
+async function refreshTranslationList() {
+    try {
+        // showProgressModalNoBackdrop('刷新中...', '正在重新加载翻译数据，请稍候...');
+        
+        await loadTranslationResults();
+        
+        // 立即关闭模态框
+        hideProgressModal();
+        forceCleanAllModals();
+        
+        // 延迟显示成功提示，确保模态框完全关闭
+        // setTimeout(() => {
+        //     showAlert('刷新成功', 'success');
+        // }, 400);
+    } catch (error) {
+        console.error('Refresh error:', error);
+        hideProgressModal();
+        forceCleanAllModals();
+        setTimeout(() => {
+            showAlert('刷新失败: ' + error.message, 'error');
+        }, 400);
+    }
+}
+
+// 翻译核查功能
+async function performTranslationCheck() {
+ 
+    
+    try {
+        showProgressModalNoBackdrop('翻译核查中...', '正在检查翻译数据，请稍候...');
+        
+        const currentPath = getCurrentPath();
+        if (!currentPath) {
+            showResultModal('提示', '请先选择项目路径', 'warning', false);
+            return;
+        }
+        
+        const response = await fetch('/api/translation_check', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                path: currentPath
+            })
+        });
+        
+        const result = await response.json();
+        
+        if (result.success) {
+            // 核查完成，直接关闭模态框，使用核查返回的数据更新表格
+            hideProgressModal();
+            forceCleanAllModals();
+            
+            // 如果后端返回了核查数据，直接使用这些数据更新表格显示
+            if (result.data && Array.isArray(result.data)) {
+                // 更新全局数据和过滤数据
+                translationListData = result.data;
+        filteredData = [...translationListData];
+        
+        // 重新渲染表格
+        renderTranslationList();
+            } else {
+                // 如果没有返回数据，则重新加载
+                await loadTranslationResults();
+            }
+        } else {
+            hideProgressModal();
+            forceCleanAllModals();
+            showResultModal('核查失败', result.message || '翻译核查失败', 'error', false);
+        }
+    } catch (error) {
+        console.error('Translation check error:', error);
+        hideProgressModal();
+        forceCleanAllModals();
+        showResultModal('核查失败', '翻译核查时发生错误：' + error.message, 'error', false);
+    }
+}
+
+// 删除翻译项目
+async function deleteTranslationItem(index) {
+    if (index >= filteredData.length) return;
+    
+    const item = filteredData[index];
+    if (!confirm(`确定要删除这条翻译记录吗？\n数据集: ${item.dataset_name}\n变量名: ${item.variable_name}\n原始值: ${item.original_value}`)) {
+        return;
+    }
+    
+    try {
+        const response = await fetch(`/api/translation_results/${item.id}`, {
+            method: 'DELETE',
+            headers: {
+                'Content-Type': 'application/json'
+            }
+        });
+        
+        const result = await response.json();
+        if (result.success) {
+            showAlert('删除成功', 'success');
+            // 刷新页面数据
+            refreshTranslationList();
+        } else {
+            showAlert(result.message || '删除失败', 'error');
+        }
+    } catch (error) {
+        console.error('Delete translation error:', error);
+        showAlert('删除翻译时发生错误', 'error');
+    }
+}
+
+// 删除单个翻译记录
+async function deleteSingle(index) {
+    if (index < 0 || index >= filteredData.length) {
+        console.warn(`索引 ${index} 超出范围`);
+        return;
+    }
+    
+    const item = filteredData[index];
+    
+    // 使用confirm确认删除
+    if (!confirm(`确定要删除这条翻译记录吗？\n数据集: ${item.dataset_name}\n变量名: ${item.variable_name}\n原始值: ${item.original_value}`)) {
+        return;
+    }
+    
+    try {
+        const response = await fetch(`/api/translation_results/${item.id}`, {
+            method: 'DELETE',
+            headers: {
+                'Content-Type': 'application/json'
+            }
+        });
+        
+        const result = await response.json();
+        if (result.success) {
+            // 直接调用刷新方法重新加载数据
+            refreshTranslationList();
+        } else {
+            showAlert(result.message || '删除失败', 'error');
+        }
+    } catch (error) {
+        console.error('Delete single translation error:', error);
+        showAlert('删除翻译时发生错误', 'error');
+    }
+}
+
+// 全部翻译
+async function translateAllItems() {
+    const needsConfirmationItems = filteredData.filter(item => item.needs_confirmation);
+    
+    if (needsConfirmationItems.length === 0) {
+        showAlert('没有需要翻译的项目', 'info');
+        return;
+    }
+    
+    if (!confirm(`确定要翻译所有 ${needsConfirmationItems.length} 个未确认的项目吗？`)) {
+        return;
+    }
+    
+    try {
+        showProgressModal('全部翻译中...', `正在翻译 ${needsConfirmationItems.length} 个项目，请稍候...`);
+        
+        let successCount = 0;
+        let failCount = 0;
+        
+        for (let i = 0; i < filteredData.length; i++) {
+            if (filteredData[i].needs_confirmation) {
+                try {
+                    await aiTranslateItemSilent(i);
+                    successCount++;
+                } catch (error) {
+                    console.error(`翻译项目 ${i} 失败:`, error);
+                    failCount++;
+                }
+            }
+        }
+        
+        hideProgressModal();
+        forceCleanAllModals();
+        showResultModal('批量翻译完成', `全部翻译完成！成功: ${successCount} 个，失败: ${failCount} 个`, 'success', true);
+    } catch (error) {
+        console.error('Translate all error:', error);
+        hideProgressModal();
+        forceCleanAllModals();
+        showAlert('全部翻译时发生错误', 'error');
+    }
+}
+
+// 静默AI翻译（不显示进度弹框）
+async function aiTranslateItemSilent(index) {
+    if (index >= filteredData.length) return;
+    
+    const item = filteredData[index];
+    const translationDirection = getTranslationDirection();
+    
+    if (!translationDirection) {
+        throw new Error('请先设置翻译方向');
+    }
+    
+    // 根据翻译方向设置源语言和目标语言
+    let sourceLang, targetLang;
+    if (translationDirection === 'en_to_zh') {
+        sourceLang = 'en';
+        targetLang = 'zh';
+    } else if (translationDirection === 'zh_to_en') {
+        sourceLang = 'zh';
+        targetLang = 'en';
+    } else {
+        throw new Error('不支持的翻译方向');
+    }
+    
+    try {
+        // 调用与单条AI翻译相同的接口
+        const response = await fetch('/api/translate_text', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                record_id: item.id,
+                source_lang: sourceLang,
+                target_lang: targetLang,
+                context: 'medical',
+                save_to_db: false  // 不保存到数据库
+            })
+        });
+        
+        // 检查HTTP响应状态
+        if (!response.ok) {
+            throw new Error(`HTTP错误: ${response.status} ${response.statusText}`);
+        }
+        
+        const result = await response.json();
+        console.log(`翻译项目 ${index} 响应:`, result); // 调试信息
+        
+        if (result.success && result.translated_text) {
+            // 更新前端显示的翻译值，不保存到数据库
+            item.translated_value = result.translated_text;
+            item.translation_source = 'AI';
+            
+            // 找到对应的输入框并更新
+            const translationInput = document.querySelector(`input[onchange*="updateTranslatedValue(${index + (displayedData.length - Math.min(displayedData.length, filteredData.length))},"]`);
+            if (translationInput) {
+                translationInput.value = result.translated_text;
+                translationInput.style.backgroundColor = '#e8f5e8';
+                setTimeout(() => {
+                    translationInput.style.backgroundColor = '';
+                }, 2000);
+                
+                // 批量翻译时不触发change事件，避免保存到数据库
+            // translationInput.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+            
+            // 更新翻译来源标签
+            const sourceRow = translationInput ? translationInput.closest('tr') : null;
+            if (sourceRow) {
+                const sourceBadge = sourceRow.querySelector('.badge');
+                if (sourceBadge) {
+                    sourceBadge.textContent = 'AI';
+                    sourceBadge.className = 'badge bg-success';
+                }
+            }
+        } else {
+            const errorMsg = result.message || 'AI翻译失败';
+            console.error(`翻译项目 ${index} 失败:`, errorMsg, result);
+            throw new Error(errorMsg);
+        }
+    } catch (error) {
+        console.error(`翻译项目 ${index} 异常:`, error);
+        throw error;
+    }
+}
+
+// 全部确认
+async function confirmAllItems() {
+    const needsConfirmationItems = filteredData.filter(item => item.needs_confirmation);
+    
+    if (needsConfirmationItems.length === 0) {
+        showAlert('没有需要确认的项目', 'info');
+        return;
+    }
+    
+    if (!confirm(`确定要确认所有 ${needsConfirmationItems.length} 个未确认的项目吗？`)) {
+        return;
+    }
+    
+    try {
+        showProgressModal('全部确认中...', `正在确认 ${needsConfirmationItems.length} 个项目，请稍候...`);
+        
+        const itemsToConfirm = needsConfirmationItems.map(item => ({
+            id: item.id,
+            translated_value: item.translated_value,
+            needs_confirmation: false,
+            is_confirmed: true
+        }));
+        
+        const response = await fetch('/api/batch_confirm_translations', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                items: itemsToConfirm
+            })
+        });
+        
+        const result = await response.json();
+        if (result.success) {
+            hideProgressModal();
+            // 使用强力清理函数确保完全清除模态框
+            forceCleanAllModals();
+            showAlert(`全部确认完成！共确认 ${needsConfirmationItems.length} 个项目`, 'success');
+            // 刷新页面数据
+            refreshTranslationList();
+        } else {
+            hideProgressModal();
+            // 使用强力清理函数确保完全清除模态框
+            forceCleanAllModals();
+            showAlert(result.message || '全部确认失败', 'error');
+        }
+    } catch (error) {
+        console.error('Confirm all error:', error);
+        hideProgressModal();
+        // 使用强力清理函数确保完全清除模态框
+        forceCleanAllModals();
+        showAlert('全部确认时发生错误', 'error');
+    }
+}
+
+// 导出翻译数据
+async function exportTranslationData() {
+    const currentPath = getCurrentPath();
+    if (!currentPath) {
+        showAlert('请先选择项目路径', 'warning');
+        return;
+    }
+    
+    try {
+        showProgressModal('导出中...', '正在导出所有翻译数据，请稍候...');
+        
+        const response = await fetch('/api/export_translations', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                path: currentPath
+            })
+        });
+        
+        if (response.ok) {
+            const blob = await response.blob();
+            const url = window.URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.href = url;
+            
+            // 生成文件名
+            const now = new Date();
+            const timestamp = now.getFullYear() + 
+                             String(now.getMonth() + 1).padStart(2, '0') + 
+                             String(now.getDate()).padStart(2, '0') + '_' +
+                             String(now.getHours()).padStart(2, '0') + 
+                             String(now.getMinutes()).padStart(2, '0');
+            
+            link.download = `翻译清单_${timestamp}.xlsx`;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            window.URL.revokeObjectURL(url);
+            
+            hideProgressModal();
+            forceCleanAllModals();
+            showAlert('导出成功！', 'success');
+        } else {
+            const result = await response.json();
+            hideProgressModal();
+            forceCleanAllModals();
+            showAlert('导出失败: ' + (result.message || '未知错误'), 'error');
+        }
+    } catch (error) {
+        console.error('Export error:', error);
+        hideProgressModal();
+        forceCleanAllModals();
+        showAlert('导出时发生错误: ' + error.message, 'error');
+    }
+}
+
+// 显示进度弹框
+function showProgressModal(title, message) {
+    // 移除已存在的进度弹框
+    const existingModal = document.getElementById('progressModal');
+    if (existingModal) {
+        existingModal.remove();
+    }
+    
+    const modal = document.createElement('div');
+    modal.id = 'progressModal';
+    modal.className = 'modal fade';
+    modal.innerHTML = `
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content">
+                <div class="modal-body text-center">
+                    <div class="spinner-border text-primary mb-3" role="status">
+                        <span class="visually-hidden">Loading...</span>
+                    </div>
+                    <h5>${title}</h5>
+                    <p class="text-muted mb-0">${message}</p>
+                </div>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(modal);
+    
+    const bootstrapModal = new bootstrap.Modal(modal, {
+        backdrop: 'static',
+        keyboard: false
+    });
+    
+    bootstrapModal.show();
+}
+
+// 隐藏进度弹框
+function hideProgressModal() {
+    const modal = document.getElementById('progressModal');
+    if (modal) {
+        const bootstrapModal = bootstrap.Modal.getInstance(modal);
+        if (bootstrapModal) {
+            bootstrapModal.hide();
+            setTimeout(() => {
+                modal.remove();
+            }, 300);
+        }
+    }
 }

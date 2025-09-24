@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, jsonify, session
+from flask import Flask, render_template, request, jsonify, send_file
 import pandas as pd
 import pyreadstat
 import os
@@ -12,10 +12,7 @@ import hashlib
 import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
-import uuid
-import time
-import pickle
-import re
+from data_translation import data_translation_bp
 
 # 加载环境变量
 try:
@@ -29,66 +26,14 @@ except ImportError:
 try:
     pd.set_option('future.no_silent_downcasting', True)
 except Exception:
-    pass
-
-def _is_numeric_or_date_value(value_str):
-    """检查字符串是否为纯数字、日期格式或其他不需要翻译的格式"""
-    if not value_str or not isinstance(value_str, str):
-        return False
-    
-    value_str = value_str.strip()
-    
-    # 检查是否为纯数字（包括小数）
-    try:
-        float(value_str)
-        return True
-    except ValueError:
-        pass
-    
-    # 检查是否为日期格式（YYYY-MM-DD, DD/MM/YYYY, MM/DD/YYYY等）
-    date_patterns = [
-        r'^\d{4}-\d{1,2}-\d{1,2}$',  # YYYY-MM-DD
-        r'^\d{1,2}/\d{1,2}/\d{4}$',  # MM/DD/YYYY or DD/MM/YYYY
-        r'^\d{1,2}-\d{1,2}-\d{4}$',  # MM-DD-YYYY or DD-MM-YYYY
-        r'^\d{4}/\d{1,2}/\d{1,2}$',  # YYYY/MM/DD
-        r'^\d{1,2}:\d{1,2}(:\d{1,2})?$',  # HH:MM or HH:MM:SS
-        r'^\d{4}-\d{1,2}-\d{1,2}T\d{1,2}:\d{1,2}:\d{1,2}',  # ISO datetime
-        r'^\d{4}-\d{1,2}-\d{1,2}\s+\d{1,2}:\d{1,2}:\d{1,2}',  # YYYY-MM-DD HH:MM:SS
-    ]
-    
-    for pattern in date_patterns:
-        if re.match(pattern, value_str):
-            return True
-    
-    # 检查是否为纯数字和连字符组合（如编码）
-    if re.match(r'^[\d\-\.]+$', value_str):
-        return True
-    
-    return False
+    pass  # 如果选项不存在则忽略
 
 app = Flask(__name__)
 
-# 配置Secret Key - 优先使用环境变量，提供安全的fallback
-def get_secret_key():
-    """获取应用密钥，优先使用环境变量"""
-    # 1. 优先使用环境变量
-    secret_key = os.getenv('SECRET_KEY')
-    if secret_key and secret_key != 'your_secret_key_here':
-        return secret_key
-    
-    # 2. 生产环境检查
-    if os.getenv('FLASK_ENV') == 'production':
-        raise ValueError("生产环境必须设置有效的SECRET_KEY环境变量！")
-    
-    # 3. 开发环境使用固定值（方便调试）
-    print("⚠️  警告：正在使用默认的SECRET_KEY，生产环境请设置环境变量")
-    return 'dev-secret-key-change-in-production'
+# 注册蓝图
+app.register_blueprint(data_translation_bp)
 
-app.secret_key = get_secret_key()
 
-# 全局进度追踪系统
-progress_store = {}
-progress_lock = threading.Lock()
 
 class DatabaseManager:
     def __init__(self, db_path='translation_db.sqlite'):
@@ -185,6 +130,28 @@ class DatabaseManager:
                 )
             ''')
             
+            # 翻译结果表
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS translation_results (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    path_hash TEXT NOT NULL,         -- 路径哈希值，用于关联特定的SAS文件路径
+                    translation_direction TEXT NOT NULL, -- 翻译方向（中译英/英译中）
+                    translation_type TEXT NOT NULL,  -- 翻译类型（编码清单/非编码清单/数据集label/变量label）
+                    dataset_name TEXT NOT NULL,      -- 数据集名称
+                    variable_name TEXT NOT NULL,     -- 变量名称
+                    original_value TEXT NOT NULL,    -- 原始值
+                    translated_value TEXT NOT NULL,  -- 翻译值
+                    translation_source TEXT NOT NULL, -- 翻译来源（database/AI）
+                    needs_confirmation BOOLEAN DEFAULT FALSE, -- 是否需要确认（布尔值）
+                    is_confirmed BOOLEAN DEFAULT FALSE,       -- 是否已确认（布尔值）
+                    confidence_score REAL DEFAULT 1.0,       -- 置信度分数（0.0-1.0）
+                    comments TEXT DEFAULT '',                 -- 备注信息
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, -- 创建时间
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, -- 更新时间
+                    UNIQUE(path_hash, dataset_name, variable_name, original_value, translation_type, translation_direction)
+                )
+            ''')
+            
             conn.commit()
         finally:
             conn.close()
@@ -198,10 +165,10 @@ class DatabaseManager:
         try:
             cursor = conn.cursor()
             cursor.execute('''
-                INSERT OR REPLACE INTO mapping_configs 
+                INSERT OR REPLACE INTO translation_configs 
                 (path_hash, path, mode, translation_direction, name, configs, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
-            ''', (path_hash, path, mode, translation_direction, name, configs_json, datetime.now()))
+            ''', (path_hash, path, mode, translation_direction, name, configs_json, datetime.now().isoformat()))
             conn.commit()
             return True
         except Exception as e:
@@ -245,7 +212,7 @@ class DatabaseManager:
                 INSERT OR REPLACE INTO translation_library_configs 
                 (path_hash, path, mode, translation_direction, meddra_version, whodrug_version, ig_version, meddra_config, whodrug_config, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (path_hash, path, mode, translation_direction, meddra_version, whodrug_version, ig_version, meddra_config_json, whodrug_config_json, datetime.now()))
+            ''', (path_hash, path, mode, translation_direction, meddra_version, whodrug_version, ig_version, meddra_config_json, whodrug_config_json, datetime.now().isoformat()))
             conn.commit()
             return True
         except Exception as e:
@@ -291,7 +258,7 @@ class DatabaseManager:
                 INSERT OR REPLACE INTO merge_configs 
                 (path_hash, path, translation_direction, configs, updated_at)
                 VALUES (?, ?, ?, ?, ?)
-            ''', (path_hash, path, translation_direction, configs_json, datetime.now()))
+            ''', (path_hash, path, translation_direction, configs_json, datetime.now().isoformat()))
             conn.commit()
             return True
         except Exception as e:
@@ -328,13 +295,13 @@ class DatabaseManager:
             cursor = conn.cursor()
             
             # 获取MedDRA表
-            cursor.execute('SELECT name, description, record_count, version FROM meddra_tables ORDER BY name')
-            meddra_tables = [{'name': row[0], 'description': row[1], 'record_count': row[2], 'version': row[3]} 
+            cursor.execute('SELECT name, description, record_count FROM meddra_tables ORDER BY name')
+            meddra_tables = [{'name': row[0], 'description': row[1], 'record_count': row[2]} 
                            for row in cursor.fetchall()]
             
             # 获取WhoDrug表
-            cursor.execute('SELECT name, description, record_count, version FROM whodrug_tables ORDER BY name')
-            whodrug_tables = [{'name': row[0], 'description': row[1], 'record_count': row[2], 'version': row[3]} 
+            cursor.execute('SELECT name, description, record_count FROM whodrug_tables ORDER BY name')
+            whodrug_tables = [{'name': row[0], 'description': row[1], 'record_count': row[2]} 
                             for row in cursor.fetchall()]
             
             return {
@@ -381,81 +348,6 @@ class DatabaseManager:
         finally:
             conn.close()
     
-    def save_datasets(self, path, datasets):
-        """保存数据集到数据库"""
-        path_hash = hashlib.md5(path.encode()).hexdigest()
-        
-        conn = sqlite3.connect(self.db_path)
-        try:
-            cursor = conn.cursor()
-            
-            # 创建数据集存储表（如果不存在）
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS saved_datasets (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    path_hash TEXT NOT NULL,
-                    path TEXT NOT NULL,
-                    dataset_name TEXT NOT NULL,
-                    data_pickle BLOB NOT NULL,
-                    meta_json TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE(path_hash, dataset_name)
-                )
-            ''')
-            
-            # 保存每个数据集
-            for dataset_name, dataset_info in datasets.items():
-                # 序列化数据
-                data_pickle = pickle.dumps(dataset_info['data'])
-                meta_json = json.dumps(dataset_info.get('meta', {}), default=str, ensure_ascii=False)
-                
-                cursor.execute('''
-                    INSERT OR REPLACE INTO saved_datasets 
-                    (path_hash, path, dataset_name, data_pickle, meta_json, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                ''', (path_hash, path, dataset_name, data_pickle, meta_json, datetime.now()))
-            
-            conn.commit()
-            return True
-        except Exception as e:
-            print(f"Error saving datasets: {e}")
-            return False
-        finally:
-            conn.close()
-    
-    def load_datasets(self, path):
-        """从数据库加载数据集"""
-        path_hash = hashlib.md5(path.encode()).hexdigest()
-        
-        conn = sqlite3.connect(self.db_path)
-        try:
-            cursor = conn.cursor()
-            cursor.execute('''
-                SELECT dataset_name, data_pickle, meta_json FROM saved_datasets 
-                WHERE path_hash = ?
-            ''', (path_hash,))
-            
-            datasets = {}
-            for row in cursor.fetchall():
-                dataset_name, data_pickle, meta_json = row
-                
-                # 反序列化数据
-                data = pickle.loads(data_pickle)
-                meta = json.loads(meta_json) if meta_json else {}
-                
-                datasets[dataset_name] = {
-                    'data': data,
-                    'meta': meta
-                }
-            
-            return datasets if datasets else None
-        except Exception as e:
-            print(f"Error loading datasets: {e}")
-            return None
-        finally:
-            conn.close()
-    
     def check_existing_library(self):
         """检查是否存在已有的翻译库"""
         conn = sqlite3.connect(self.db_path)
@@ -466,6 +358,703 @@ class DatabaseManager:
             return count > 0
         finally:
             conn.close()
+    
+    def get_variable_translation(self, dataset_name, variable_name, translation_direction, ig_version):
+        """从variablelabel_mergeds表获取变量标签翻译"""
+        conn = sqlite3.connect(self.db_path)
+        try:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT name_cn, name_en FROM variablelabel_mergeds 
+                WHERE domain = ? AND variable = ? AND version = ?
+            ''', (dataset_name, variable_name, ig_version))
+            result = cursor.fetchone()
+            if result:
+                return {
+                    'name_cn': result[0],
+                    'name_en': result[1]
+                }
+            return None
+        finally:
+            conn.close()
+    
+    def get_batch_variable_translations(self, variable_list, ig_version):
+        """批量获取变量标签翻译 - 使用pandas优化查询效率"""
+        try:
+            if not variable_list:
+                return {}
+            
+            conn = sqlite3.connect(self.db_path)
+            
+            # 创建输入数据的DataFrame
+            input_df = pd.DataFrame(variable_list, columns=['domain', 'variable'])
+            
+            # 从数据库读取所有匹配版本的翻译数据
+            query = '''
+                SELECT domain, variable, name_cn, name_en 
+                FROM variablelabel_mergeds
+                WHERE version = ?
+            '''
+            
+            # 使用pandas直接从数据库读取数据
+            translation_df = pd.read_sql_query(query, conn, params=[ig_version])
+            
+            # 为大小写不敏感的连接创建临时列
+            input_df['domain_lower'] = input_df['domain'].str.lower()
+            input_df['variable_lower'] = input_df['variable'].str.lower()
+            translation_df['domain_lower'] = translation_df['domain'].str.lower()
+            translation_df['variable_lower'] = translation_df['variable'].str.lower()
+            
+            # 使用pandas的left join进行高效连接（大小写不敏感）
+            result_df = input_df.merge(
+                translation_df, 
+                on=['domain_lower', 'variable_lower'], 
+                how='left',
+                suffixes=('', '_db')
+            )
+            
+            # 构建结果字典（使用原始的domain和variable作为key）
+            translation_dict = {}
+            for _, row in result_df.iterrows():
+                key = (row['domain'], row['variable'])  # 使用输入的原始值作为key
+                if pd.notna(row.get('name_cn')) or pd.notna(row.get('name_en')):
+                    translation_dict[key] = {
+                        'name_cn': row.get('name_cn'),
+                        'name_en': row.get('name_en')
+                    }
+            
+            return translation_dict
+            
+        except Exception as e:
+            print(f"批量获取变量翻译时出错: {e}")
+            return {}
+        finally:
+            if conn:
+                conn.close()
+    
+    def get_batch_dataset_translations(self, dataset_list, ig_version):
+        """批量获取数据集标签翻译 - 参考get_batch_variable_translations的实现"""
+        try:
+            if not dataset_list:
+                return {}
+            
+            conn = sqlite3.connect(self.db_path)
+            
+            # 创建输入数据的DataFrame
+            input_df = pd.DataFrame(dataset_list, columns=['dataset'])
+            
+            # 从数据库读取所有匹配版本的翻译数据
+            query = '''
+                SELECT dataset, name_cn, name_en 
+                FROM datalabel_mergeds
+                WHERE version = ?
+            '''
+            
+            # 使用pandas直接从数据库读取数据
+            translation_df = pd.read_sql_query(query, conn, params=[ig_version])
+            
+            # 为大小写不敏感的连接创建临时列
+            input_df['dataset_lower'] = input_df['dataset'].str.lower()
+            translation_df['dataset_lower'] = translation_df['dataset'].str.lower()
+            
+            # 使用pandas的left join进行高效连接（大小写不敏感）
+            result_df = input_df.merge(
+                translation_df, 
+                on='dataset_lower', 
+                how='left',
+                suffixes=('', '_db')
+            )
+            
+            # 构建结果字典（使用原始的dataset作为key）
+            translation_dict = {}
+            for _, row in result_df.iterrows():
+                key = row['dataset']  # 使用输入的原始值作为key
+                if pd.notna(row.get('name_cn')) or pd.notna(row.get('name_en')):
+                    translation_dict[key] = {
+                        'name_cn': row.get('name_cn'),
+                        'name_en': row.get('name_en')
+                    }
+            
+            return translation_dict
+            
+        except Exception as e:
+            print(f"批量获取数据集翻译时出错: {e}")
+            return {}
+        finally:
+            if conn:
+                conn.close()
+    
+    def save_translation_result(self, path, translation_direction, translation_type, dataset_name, variable_name,
+                              original_value, translated_value, translation_source, 
+                              needs_confirmation=False, confidence_score=1.0, comments=''):
+        """保存翻译结果"""
+        path_hash = hashlib.md5(path.encode()).hexdigest()
+        
+        conn = sqlite3.connect(self.db_path)
+        try:
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT OR REPLACE INTO translation_results 
+                (path_hash, translation_direction, translation_type, dataset_name, variable_name, original_value, 
+                 translated_value, translation_source, needs_confirmation, confidence_score, comments, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (path_hash, translation_direction, translation_type, dataset_name, variable_name, original_value, 
+                  translated_value, translation_source, needs_confirmation, confidence_score, comments, datetime.now().isoformat()))
+            conn.commit()
+            return True
+        except Exception as e:
+            print(f"Error saving translation result: {e}")
+            return False
+        finally:
+            conn.close()
+    
+    def get_sdtm_dataset_translation(self, dataset_name, translation_direction, ig_version):
+        """从datalabel_mergeds表查找数据集翻译"""
+        conn = sqlite3.connect(self.db_path)
+        try:
+            cursor = conn.cursor()
+            
+            # 查询datalabel_mergeds表
+            cursor.execute('''
+                SELECT dataset, name_cn, name_en, version 
+                FROM datalabel_mergeds 
+                WHERE UPPER(dataset) = UPPER(?) AND version = ?
+                LIMIT 1
+            ''', (dataset_name, ig_version))
+            
+            result = cursor.fetchone()
+            if result:
+                return {
+                    'dataset': result[0],
+                    'name_cn': result[1],
+                    'name_en': result[2],
+                    'version': result[3]
+                }
+            
+            # 如果指定版本没找到，尝试查找任意版本
+            cursor.execute('''
+                SELECT dataset, name_cn, name_en, version 
+                FROM datalabel_mergeds 
+                WHERE UPPER(dataset) = UPPER(?)
+                ORDER BY version DESC
+                LIMIT 1
+            ''', (dataset_name,))
+            
+            result = cursor.fetchone()
+            if result:
+                return {
+                    'dataset': result[0],
+                    'name_cn': result[1],
+                    'name_en': result[2],
+                    'version': result[3]
+                }
+            
+            return None
+        except Exception as e:
+            print(f"Error querying SDTM dataset translation: {e}")
+            return None
+        finally:
+            conn.close()
+    
+    def create_datalabel_mergeds_table(self):
+        """创建并合并指定的SDTM表为datalabel_mergeds表"""
+        conn = sqlite3.connect(self.db_path)
+        try:
+            cursor = conn.cursor()
+            
+            # 创建合并表
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS datalabel_mergeds (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    dataset TEXT NOT NULL,
+                    name_cn TEXT,
+                    name_en TEXT,
+                    version TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(dataset, version)
+                )
+            ''')
+            
+            # 指定要合并的6张表
+            target_tables = [
+                {'name': 'sdtm2dataset3_2cn', 'version': '3.2', 'lang': 'cn'},
+                {'name': 'sdtm2dataset3_2en', 'version': '3.2', 'lang': 'en'},
+                {'name': 'sdtm2dataset3_3cn', 'version': '3.3', 'lang': 'cn'},
+                {'name': 'sdtm2dataset3_3en', 'version': '3.3', 'lang': 'en'},
+                {'name': 'sdtm2dataset3_4cn', 'version': '3.4', 'lang': 'cn'},
+                {'name': 'sdtm2dataset3_4en', 'version': '3.4', 'lang': 'en'}
+            ]
+            
+            # 清空现有数据
+            cursor.execute('DELETE FROM datalabel_mergeds')
+            
+            # 存储每个数据集的信息
+            dataset_info = {}
+            
+            # 处理每张表
+            for table_config in target_tables:
+                table_name = table_config['name']
+                version = table_config['version']
+                lang = table_config['lang']
+                
+                try:
+                    # 检查表是否存在
+                    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table_name,))
+                    if not cursor.fetchone():
+                        print(f"表 {table_name} 不存在，跳过")
+                        continue
+                    
+                    # 检查表结构
+                    cursor.execute(f"PRAGMA table_info({table_name})")
+                    columns = [row[1] for row in cursor.fetchall()]
+                    
+                    # 查找数据集和描述列
+                    dataset_col = None
+                    desc_col = None
+                    
+                    print(f"表 {table_name} 的列: {columns}")
+                    
+                    for col in columns:
+                        col_upper = col.upper()
+                        if col_upper in ['DATASET', 'DOMAIN']:
+                            dataset_col = col
+                        elif col_upper in ['DESCRIPTION', 'DESC', 'NAME', 'LABEL']:
+                            desc_col = col
+                    
+                    # 如果没找到标准列名，尝试直接匹配
+                    if not dataset_col:
+                        for col in columns:
+                            if 'DATASET' in col.upper():
+                                dataset_col = col
+                                break
+                    
+                    if not desc_col:
+                        for col in columns:
+                            if any(keyword in col.upper() for keyword in ['DESCRIPTION', 'DESC', 'NAME', 'LABEL']):
+                                desc_col = col
+                                break
+                    
+                    print(f"找到的列: dataset_col={dataset_col}, desc_col={desc_col}")
+                    
+                    if not dataset_col or not desc_col:
+                        print(f"表 {table_name} 缺少必要的列，跳过")
+                        continue
+                    
+                    # 读取数据
+                    cursor.execute(f"SELECT {dataset_col}, {desc_col} FROM {table_name} WHERE {dataset_col} IS NOT NULL AND {dataset_col} != ''")
+                    rows = cursor.fetchall()
+                    
+                    # 处理数据
+                    for row in rows:
+                        dataset = row[0].strip()
+                        description = row[1].strip() if row[1] else ''
+                        
+                        # 初始化数据集信息
+                        if dataset not in dataset_info:
+                            dataset_info[dataset] = {}
+                        if version not in dataset_info[dataset]:
+                            dataset_info[dataset][version] = {'name_cn': '', 'name_en': ''}
+                        
+                        # 根据语言设置对应字段
+                        if lang == 'cn':
+                            dataset_info[dataset][version]['name_cn'] = description
+                        else:
+                            dataset_info[dataset][version]['name_en'] = description
+                    
+                    print(f"已处理表 {table_name} (版本 {version}, 语言 {lang})")
+                    
+                except sqlite3.OperationalError as e:
+                    print(f"处理表 {table_name} 时出错: {e}")
+                    continue
+            
+            # 将合并后的数据插入到datalabel_mergeds表
+            insert_count = 0
+            for dataset, versions in dataset_info.items():
+                for version, names in versions.items():
+                    cursor.execute('''
+                        INSERT OR REPLACE INTO datalabel_mergeds (dataset, name_cn, name_en, version)
+                        VALUES (?, ?, ?, ?)
+                    ''', (dataset, names['name_cn'], names['name_en'], version))
+                    insert_count += 1
+            
+            conn.commit()
+            
+            print(f"datalabel_mergeds表创建完成，共 {insert_count} 条记录")
+            
+            return True
+            
+        except Exception as e:
+            print(f"创建datalabel_mergeds表失败: {e}")
+            return False
+        finally:
+            conn.close()
+    
+    def get_translation_results(self, path, translation_type=None, dataset_name=None, 
+                              variable_name=None, page=1, page_size=50):
+        """获取翻译结果"""
+        path_hash = hashlib.md5(path.encode()).hexdigest()
+        
+        conn = sqlite3.connect(self.db_path)
+        try:
+            cursor = conn.cursor()
+            
+            # 构建查询条件
+            query = '''
+                SELECT id, translation_type, dataset_name, variable_name, original_value, 
+                       translated_value, translation_source, needs_confirmation, is_confirmed, 
+                       confidence_score, comments, created_at, updated_at
+                FROM translation_results 
+                WHERE path_hash = ?
+            '''
+            params = [path_hash]
+            
+            if translation_type:
+                query += ' AND translation_type = ?'
+                params.append(translation_type)
+            
+            if dataset_name:
+                query += ' AND dataset_name = ?'
+                params.append(dataset_name)
+                
+            if variable_name:
+                query += ' AND variable_name = ?'
+                params.append(variable_name)
+            
+            # 获取总数
+            count_query = query.replace(
+                'SELECT id, translation_type, dataset_name, variable_name, original_value, translated_value, translation_source, needs_confirmation, is_confirmed, confidence_score, comments, created_at, updated_at',
+                'SELECT COUNT(*)'
+            )
+            cursor.execute(count_query, params)
+            total_count = cursor.fetchone()[0]
+            
+            # 添加排序和分页
+            query += ' ORDER BY translated_value DESC, translation_source DESC, needs_confirmation DESC, is_confirmed DESC, translation_type ASC, dataset_name ASC, variable_name ASC'
+            if page_size > 0:
+                offset = (page - 1) * page_size
+                query += f' LIMIT {page_size} OFFSET {offset}'
+            
+            cursor.execute(query, params)
+            results = cursor.fetchall()
+            
+            data = [{
+                'id': row[0],
+                'translation_type': row[1],
+                'dataset_name': row[2],
+                'variable_name': row[3],
+                'original_value': row[4],
+                'translated_value': row[5],
+                'translation_source': row[6],
+                'needs_confirmation': bool(row[7]),
+                'is_confirmed': bool(row[8]),
+                'confidence_score': row[9],
+                'comments': row[10],
+                'created_at': row[11],
+                'updated_at': row[12]
+            } for row in results]
+            
+            return {
+                'items': data,
+                'total': total_count,
+                'page': page,
+                'page_size': page_size,
+                'total_pages': (total_count + page_size - 1) // page_size if page_size > 0 else 1
+            }
+        finally:
+            conn.close()
+    
+    def update_translation_confirmation(self, path, translation_type, dataset_name, 
+                                      variable_name, original_value, is_confirmed):
+        """更新翻译确认状态"""
+        path_hash = hashlib.md5(path.encode()).hexdigest()
+        
+        conn = sqlite3.connect(self.db_path)
+        try:
+            cursor = conn.cursor()
+            cursor.execute('''
+                UPDATE translation_results 
+                SET is_confirmed = ?, updated_at = ?
+                WHERE path_hash = ? AND translation_type = ? AND dataset_name = ? 
+                      AND variable_name = ? AND original_value = ?
+            ''', (is_confirmed, datetime.now().isoformat(), path_hash, translation_type, 
+                  dataset_name, variable_name, original_value))
+            conn.commit()
+            return cursor.rowcount > 0
+        except Exception as e:
+            print(f"Error updating translation confirmation: {e}")
+            return False
+        finally:
+            conn.close()
+    
+    def get_translation_result_by_id(self, result_id):
+        """根据ID获取翻译结果记录"""
+        conn = sqlite3.connect(self.db_path)
+        try:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT id, translation_type, dataset_name, variable_name, original_value, 
+                       translated_value, translation_source, needs_confirmation, is_confirmed, 
+                       confidence_score, created_at, updated_at
+                FROM translation_results 
+                WHERE id = ?
+            ''', (result_id,))
+            
+            row = cursor.fetchone()
+            if row:
+                return {
+                    'id': row[0],
+                    'translation_type': row[1],
+                    'dataset_name': row[2],
+                    'variable_name': row[3],
+                    'original_value': row[4],
+                    'translated_value': row[5],
+                    'translation_source': row[6],
+                    'needs_confirmation': bool(row[7]),
+                    'is_confirmed': bool(row[8]),
+                    'confidence_score': row[9],
+                    'created_at': row[10],
+                    'updated_at': row[11]
+                }
+            return None
+        except Exception as e:
+            print(f"Error getting translation result by ID: {e}")
+            return None
+        finally:
+            conn.close()
+    
+    def update_translation_result(self, result_id, translated_value=None,
+                                needs_confirmation=None, is_confirmed=None, translation_source=None, comments=None):
+        """更新翻译结果"""
+        conn = sqlite3.connect(self.db_path)
+        try:
+            cursor = conn.cursor()
+            
+            # 构建更新语句
+            update_fields = []
+            params = []
+            
+            if translated_value is not None:
+                update_fields.append('translated_value = ?')
+                params.append(translated_value)
+            
+            if needs_confirmation is not None:
+                update_fields.append('needs_confirmation = ?')
+                params.append(needs_confirmation)
+            
+            if is_confirmed is not None:
+                update_fields.append('is_confirmed = ?')
+                params.append(is_confirmed)
+            
+            if translation_source is not None:
+                update_fields.append('translation_source = ?')
+                params.append(translation_source)
+            
+            if comments is not None:
+                update_fields.append('comments = ?')
+                params.append(comments)
+            
+            if not update_fields:
+                return False
+            
+            # 添加更新时间
+            update_fields.append('updated_at = ?')
+            params.append(datetime.now().isoformat())
+            
+            # 添加ID条件
+            params.append(result_id)
+            
+            query = f'''
+                UPDATE translation_results 
+                SET {', '.join(update_fields)}
+                WHERE id = ?
+            '''
+            
+            cursor.execute(query, params)
+            conn.commit()
+            return cursor.rowcount > 0
+        except Exception as e:
+            print(f"Error updating translation result: {e}")
+            return False
+        finally:
+            conn.close()
+    
+    def delete_translation_result(self, result_id):
+        """删除翻译结果"""
+        conn = sqlite3.connect(self.db_path)
+        try:
+            cursor = conn.cursor()
+            
+            cursor.execute('DELETE FROM translation_results WHERE id = ?', (result_id,))
+            conn.commit()
+            
+            return cursor.rowcount > 0
+        except Exception as e:
+            print(f"Error deleting translation result: {e}")
+            return False
+        finally:
+            conn.close()
+    
+    def get_translation_statistics(self, path):
+        """获取翻译统计信息"""
+        path_hash = hashlib.md5(path.encode()).hexdigest()
+        
+        conn = sqlite3.connect(self.db_path)
+        try:
+            cursor = conn.cursor()
+            
+            # 总翻译数量
+            cursor.execute('SELECT COUNT(*) FROM translation_results WHERE path_hash = ?', (path_hash,))
+            total_count = cursor.fetchone()[0]
+            
+            # 按翻译类型统计
+            cursor.execute('''
+                SELECT translation_type, COUNT(*) 
+                FROM translation_results 
+                WHERE path_hash = ? 
+                GROUP BY translation_type
+            ''', (path_hash,))
+            type_stats = dict(cursor.fetchall())
+            
+            # 按翻译来源统计
+            cursor.execute('''
+                SELECT translation_source, COUNT(*) 
+                FROM translation_results 
+                WHERE path_hash = ? 
+                GROUP BY translation_source
+            ''', (path_hash,))
+            source_stats = dict(cursor.fetchall())
+            
+            # 需要确认的数量
+            cursor.execute('''
+                SELECT COUNT(*) FROM translation_results 
+                WHERE path_hash = ? AND needs_confirmation = TRUE AND is_confirmed = FALSE
+            ''', (path_hash,))
+            pending_confirmation = cursor.fetchone()[0]
+            
+            return {
+                'total_count': total_count,
+                'type_stats': type_stats,
+                'source_stats': source_stats,
+                'pending_confirmation': pending_confirmation
+            }
+        finally:
+            conn.close()
+    
+    def get_all_translation_results(self, path):
+        """获取指定路径的所有翻译结果"""
+        path_hash = hashlib.md5(path.encode()).hexdigest()
+        
+        conn = sqlite3.connect(self.db_path)
+        try:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT translation_type, dataset_name, variable_name, original_value, 
+                       translated_value, translation_source, comments, needs_confirmation
+                FROM translation_results 
+                WHERE path_hash = ?
+                ORDER BY dataset_name, variable_name, original_value
+            ''', (path_hash,))
+            
+            results = cursor.fetchall()
+            return [{
+                'translation_type': row[0],
+                'dataset_name': row[1],
+                'variable_name': row[2],
+                'original_value': row[3],
+                'translated_value': row[4],
+                'translation_source': row[5],
+                'comments': row[6],
+                'needs_confirmation': bool(row[7])
+            } for row in results]
+        finally:
+            conn.close()
+    
+    def perform_translation_check(self, path):
+        """执行翻译核查"""
+        path_hash = hashlib.md5(path.encode()).hexdigest()
+        
+        conn = sqlite3.connect(self.db_path)
+        try:
+            cursor = conn.cursor()
+            
+            # 仅获取needs_confirmation=1的翻译结果
+            cursor.execute('''
+                SELECT id, original_value, translated_value, comments, dataset_name, variable_name,
+                       translation_type, translation_source, needs_confirmation, is_confirmed, confidence_score
+                FROM translation_results 
+                WHERE path_hash = ? AND needs_confirmation = 1
+            ''', (path_hash,))
+            
+            results = cursor.fetchall()
+            checked_items = []
+            
+            # 按原始值分组，用于检查相同原始值的不同翻译
+            original_value_groups = {}
+            for result in results:
+                original_value = result[1]
+                if original_value:
+                    if original_value not in original_value_groups:
+                        original_value_groups[original_value] = []
+                    original_value_groups[original_value].append(result)
+            
+            # 对每个结果进行核查
+            for result in results:
+                result_id, original_value, translated_value, current_comments, dataset_name, variable_name, translation_type, translation_source, needs_confirmation, is_confirmed, confidence_score = result
+                check_results = []
+                
+                # 核查规则1：中译英时，检查翻译值是否包含中文字符
+                if translated_value and any('\u4e00' <= char <= '\u9fa5' for char in translated_value):
+                    check_results.append('翻译值包含中文')
+                
+                # 核查规则2：翻译值为空
+                if not translated_value or translated_value.strip() == '':
+                    check_results.append('翻译值为空')
+                
+                # 核查规则3：相同原始值，翻译值不同且不为空
+                if original_value and original_value in original_value_groups:
+                    same_original_items = original_value_groups[original_value]
+                    if len(same_original_items) > 1:
+                        translated_values = [item[2] for item in same_original_items if item[2] and item[2].strip()]
+                        unique_translations = list(set(translated_values))
+                        if len(unique_translations) > 1:
+                            check_results.append('相同值翻译不同，请核查')
+                
+                # 如果有核查结果，更新备注
+                if check_results:
+                    new_comments = ';'.join(check_results)
+                    cursor.execute('''
+                        UPDATE translation_results 
+                        SET comments = ?, updated_at = ?
+                        WHERE id = ?
+                    ''', (new_comments, datetime.now().isoformat(), result_id))
+                    
+                    # 添加到核查结果列表
+                    checked_items.append({
+                        'id': result_id,
+                        'original_value': original_value or '',
+                        'translated_value': translated_value or '',
+                        'comments': new_comments,
+                        'dataset_name': dataset_name or '',
+                        'variable_name': variable_name or '',
+                        'translation_type': translation_type or '',
+                        'translation_source': translation_source or '未翻译',
+                        'needs_confirmation': needs_confirmation,
+                        'is_confirmed': is_confirmed,
+                        'confidence_score': confidence_score
+                    })
+            
+            conn.commit()
+            
+            # 按备注、原始值、数据集、变量排序
+            checked_items.sort(key=lambda x: (x['comments'], x['original_value'], x['dataset_name'], x['variable_name']))
+            
+            return checked_items
+            
+        except Exception as e:
+            print(f"Error performing translation check: {e}")
+            return []
+        finally:
+            conn.close()
 
 class SASDataProcessor:
     def __init__(self):
@@ -473,25 +1062,7 @@ class SASDataProcessor:
         self.merged_datasets = {}
         self.hide_supp_in_preview = False
         self.translation_direction = 'zh_to_en'  # 默认中译英
-        self.current_path = None  # 当前数据路径
-        self.supp_merged = False  # 标记SUPP数据是否已合并
-        self.merge_executed = False  # 标记是否执行过合并配置
 
-    def has_merged_data(self) -> bool:
-        """检查是否有合并后的数据（SUPP数据已合并或执行过合并配置）"""
-        return self.supp_merged or self.merge_executed
-    
-    def get_merge_status(self) -> dict:
-        """获取数据合并状态信息"""
-        supp_count = len([name for name in self.datasets.keys() if name.upper().startswith('SUPP')])
-        return {
-            'supp_merged': self.supp_merged,
-            'merge_executed': self.merge_executed,
-            'has_merged_data': self.has_merged_data(),
-            'supp_datasets_count': supp_count,
-            'total_datasets_count': len(self.datasets)
-        }
-    
     @staticmethod
     def _normalize_key_series(series: pd.Series) -> pd.Series:
         """将键列标准化为可比对的字符串表示，例如将 1.0 规范为 '1'，去除首尾空白。"""
@@ -513,42 +1084,16 @@ class SASDataProcessor:
         try:
             dataset_name = Path(file_path).stem
             df, meta = pyreadstat.read_sas7bdat(file_path)
-            
-            # 从meta对象中提取数据集标签
-            dataset_label = ''
-            # 优先保持原有的数据集标签，避免被数据集名称覆盖
-            if meta and hasattr(meta, 'table_name') and meta.table_name and meta.table_name != dataset_name:
-                dataset_label = meta.table_name
-            elif meta and hasattr(meta, 'file_label') and meta.file_label and meta.file_label != dataset_name:
-                dataset_label = meta.file_label
-            elif meta and hasattr(meta, 'dataset_label') and meta.dataset_label and meta.dataset_label != dataset_name:
-                dataset_label = meta.dataset_label
-            
-            # 如果meta中没有合适的标签，尝试从其他属性获取
-            if not dataset_label and meta:
-                # 尝试从meta的其他可能属性获取标签
-                for attr in ['label', 'description', 'title']:
-                    if hasattr(meta, attr):
-                        attr_value = getattr(meta, attr) or ''
-                        if attr_value and attr_value != dataset_name:
-                            dataset_label = attr_value
-                            break
-            
-            # 最后的回退：如果仍然没有合适的标签，才使用数据集名称作为默认标签
-            if not dataset_label:
-                dataset_label = dataset_name
-            
             return dataset_name, {
                 'data': df.copy(),
                 'raw_data': df.copy(),
                 'meta': meta,
-                'label': dataset_label,  # 添加数据集标签
                 'path': file_path
             }, None
         except Exception as e:
             return Path(file_path).stem, None, str(e)
     
-    def read_sas_files(self, directory_path, mode='RAW', use_multithread=True, max_workers=None, progress_callback=None):
+    def read_sas_files(self, directory_path, mode='RAW', use_multithread=True, max_workers=None):
         """读取SAS数据集文件
         
         Args:
@@ -556,16 +1101,9 @@ class SASDataProcessor:
             mode: 读取模式 ('RAW' 或 'SDTM')
             use_multithread: 是否使用多线程读取
             max_workers: 最大线程数，默认为None（自动选择）
-            progress_callback: 进度回调函数，接收 (current, total, message) 参数
         """
         self.datasets = {}
         self.hide_supp_in_preview = (mode == 'SDTM')
-        self.current_path = directory_path  # 保存当前路径
-        
-        # 重置合并状态标志，因为重新读取数据时需要重新执行合并
-        self.supp_merged = False
-        self.merge_executed = False
-        print(f'重新读取数据，重置合并状态标志: supp_merged={self.supp_merged}, merge_executed={self.merge_executed}')
         
         try:
             sas_files = glob.glob(os.path.join(directory_path, "*.sas7bdat"))
@@ -573,101 +1111,51 @@ class SASDataProcessor:
             if not sas_files:
                 return False, "未找到SAS数据集文件"
             
-            # 按文件大小排序，优先处理小文件
-            sas_files_with_size = []
-            for file_path in sas_files:
-                try:
-                    size = os.path.getsize(file_path)
-                    sas_files_with_size.append((file_path, size))
-                except:
-                    sas_files_with_size.append((file_path, 0))
-            
-            # 按文件大小排序（小文件优先）
-            sas_files_with_size.sort(key=lambda x: x[1])
-            sas_files = [f[0] for f in sas_files_with_size]
-            
             failed_files = []
-            completed_count = 0
-            total_count = len(sas_files)
-            
-            if progress_callback:
-                progress_callback(0, total_count, "开始读取数据文件...")
             
             if use_multithread and len(sas_files) > 1:
-                # 使用多线程读取，优化线程数选择
+                # 使用多线程读取
                 if max_workers is None:
-                    # 根据文件数量和CPU核心数智能选择线程数
-                    cpu_count = os.cpu_count() or 4
-                    if total_count <= 4:
-                        max_workers = total_count
-                    elif total_count <= 10:
-                        max_workers = min(cpu_count, 6)
-                    else:
-                        max_workers = min(cpu_count * 2, 8)  # 大量文件时限制线程数
+                    # 根据文件数量和CPU核心数自动选择线程数
+                    max_workers = min(len(sas_files), os.cpu_count() or 4)
                 
                 with ThreadPoolExecutor(max_workers=max_workers) as executor:
                     # 提交所有读取任务
                     future_to_file = {executor.submit(self._read_single_sas_file, file_path): file_path 
                                     for file_path in sas_files}
                     
-                    # 收集结果并更新进度
+                    # 收集结果
                     for future in as_completed(future_to_file):
                         file_path = future_to_file[future]
                         dataset_name, dataset_data, error = future.result()
                         
-                        completed_count += 1
-                        
                         if error:
                             failed_files.append(f"{dataset_name}: {error}")
-                            if progress_callback:
-                                progress_callback(completed_count, total_count, f"读取失败: {dataset_name}")
                         else:
                             self.datasets[dataset_name] = dataset_data
-                            if progress_callback:
-                                progress_callback(completed_count, total_count, f"已读取: {dataset_name}")
             else:
                 # 单线程读取（原有逻辑）
-                for i, file_path in enumerate(sas_files):
+                for file_path in sas_files:
                     dataset_name, dataset_data, error = self._read_single_sas_file(file_path)
-                    completed_count += 1
-                    
                     if error:
                         failed_files.append(f"{dataset_name}: {error}")
-                        if progress_callback:
-                            progress_callback(completed_count, total_count, f"读取失败: {dataset_name}")
                     else:
                         self.datasets[dataset_name] = dataset_data
-                        if progress_callback:
-                            progress_callback(completed_count, total_count, f"已读取: {dataset_name}")
             
             if mode == 'SDTM':
-                # 构建预览视图并执行SUPP数据合并
-                if progress_callback:
-                    progress_callback(total_count, total_count, "构建数据预览...")
+                # 仅构建预览视图，不直接改写主表
                 self._build_preview_views()
-                
-                if progress_callback:
-                    progress_callback(total_count, total_count, "执行SUPP数据合并...")
-                self._auto_merge_all_supp_data()  # 执行SUPP数据合并
             
             success_count = len(self.datasets)
-            
-            if progress_callback:
-                progress_callback(total_count, total_count, "数据读取完成")
+            total_count = len(sas_files)
             
             if failed_files:
                 error_msg = f"成功读取 {success_count}/{total_count} 个数据集。失败的文件: {'; '.join(failed_files[:3])}"
                 if len(failed_files) > 3:
                     error_msg += f" 等{len(failed_files)}个文件"
-                # 设置当前路径（即使有失败文件，只要有成功的就设置）
-                if success_count > 0:
-                    self.current_path = directory_path
                 return success_count > 0, error_msg
             else:
                 method = "多线程" if use_multithread and len(sas_files) > 1 else "单线程"
-                # 设置当前路径
-                self.current_path = directory_path
-                
                 return True, f"成功使用{method}读取 {success_count} 个数据集"
                 
         except Exception as e:
@@ -857,24 +1345,6 @@ class SASDataProcessor:
         # 存储QLABEL映射
         if qlabel_map:
             self.datasets[target_name].setdefault('extra_meta', {})['supp_variable_labels'] = qlabel_map
-            
-            # 更新目标数据集的变量标签
-            target_entry = self.datasets[target_name]
-            if 'meta' in target_entry and hasattr(target_entry['meta'], 'column_labels'):
-                if isinstance(target_entry['meta'].column_labels, dict):
-                    # 为新增的SUPP变量添加标签
-                    target_df = target_entry['data']
-                    for qnam, qlabel in qlabel_map.items():
-                        # 检查变量是否存在于目标数据集中（可能有重命名）
-                        if qnam in target_df.columns and qnam not in target_entry['meta'].column_labels:
-                            target_entry['meta'].column_labels[qnam] = qlabel
-                            print(f'为SUPP变量 {qnam} 设置标签: {qlabel}')
-                        else:
-                            # 检查重命名后的变量
-                            for col in target_df.columns:
-                                if col.startswith(f'{qnam}_SUPP') and col not in target_entry['meta'].column_labels:
-                                    target_entry['meta'].column_labels[col] = qlabel
-                                    print(f'为重命名SUPP变量 {col} 设置标签: {qlabel}')
 
     def _transpose_supp_for_display(self, supp_name: str, supp_df: pd.DataFrame) -> None:
         """生成并缓存SUPP数据集的转置宽表，仅用于前端展示选择变量（变量名=QNAM）。"""
@@ -1132,7 +1602,7 @@ class SASDataProcessor:
             }
         return info
     
-    def merge_variables(self, merge_config, progress_callback=None):
+    def merge_variables(self, merge_config):
         """根据配置合并变量。
         支持两种配置格式：
         1) 旧格式：{'dataset': 'CM', 'target': 'NEW', 'sources': ['A','B']}
@@ -1141,10 +1611,7 @@ class SASDataProcessor:
         仅在目标数据集内删除被合并的源变量。
         """
         try:
-            total_configs = len(merge_config)
-            for i, config in enumerate(merge_config):
-                if progress_callback:
-                    progress_callback(f"处理合并配置 {i+1}/{total_configs}", (i / total_configs) * 100)
+            for config in merge_config:
                 # 解析配置（兼容旧版）
                 if isinstance(config.get('target'), dict):
                     target_dataset = config['target'].get('dataset')
@@ -1272,30 +1739,22 @@ class SASDataProcessor:
                     target_rows['QVAL'] = concat_df.apply(_join_parts, axis=1).values
                     # 写回原表
                     supp_df.loc[target_rows.index, 'QVAL'] = target_rows['QVAL']
-                    
-                    # 先删除源 SUPP QNAM，再回写数据
-                    for s_ds, qnams in supp_to_drop_map.items():
-                        if s_ds == target_dataset:
-                            # 如果源数据集就是目标数据集，直接从当前supp_df中删除
-                            if 'QNAM' in supp_df.columns:
-                                supp_df = supp_df[~supp_df['QNAM'].isin(list(qnams))].copy()
-                        else:
-                            # 如果是其他数据集，从对应数据集中删除
-                            e = self.datasets.get(s_ds)
-                            if e and 'QNAM' in e.get('raw_data', e['data']).columns:
-                                src_df = e.get('raw_data', e['data']).copy()
-                                filtered = src_df[~src_df['QNAM'].isin(list(qnams))].copy()
-                                e['raw_data'] = filtered.copy()
-                                e['data'] = filtered.copy()
-                                # 更新SUPP的转置供选择器使用
-                                self._transpose_supp_for_display(s_ds, filtered)
-                    
                     # 回写 raw 与 data
                     self.datasets[target_dataset]['raw_data'] = supp_df.copy()
                     self.datasets[target_dataset]['data'] = supp_df.copy()
 
                     # 删除源 SUPP QNAM
-                    # 注意：这部分逻辑已经在上面处理过了，这里删除重复代码
+                    for s_ds, qnams in supp_to_drop_map.items():
+                        e = self.datasets.get(s_ds)
+                        if not e:
+                            continue
+                        src_df = e.get('raw_data', e['data']).copy()
+                        if 'QNAM' in src_df.columns:
+                            filtered = src_df[~src_df['QNAM'].isin(list(qnams))].copy()
+                            e['raw_data'] = filtered.copy()
+                            e['data'] = filtered.copy()
+                            # 更新SUPP的转置供选择器使用
+                            self._transpose_supp_for_display(s_ds, filtered)
 
                     # 关键：重新映射当前所有 SUPP → 主表 的视图，保持最初合并规则与键不变
                     self._build_preview_views()
@@ -1417,42 +1876,14 @@ class SASDataProcessor:
 
                 target_df[target_var] = aligned_frame.apply(concat_row, axis=1)
 
-                # 在目标数据集中删除与目标同表的源列（排除目标变量本身）
-                same_table_source_cols = [s.get('column') for s in sources_desc if s.get('dataset') == target_dataset and s.get('column') != target_var]
+                # 在目标数据集中删除与目标同表的源列
+                same_table_source_cols = [s.get('column') for s in sources_desc if s.get('dataset') == target_dataset]
                 if same_table_source_cols:
-                    print(f'删除同表源列: {same_table_source_cols}')
                     target_df.drop(columns=same_table_source_cols, inplace=True, errors='ignore')
 
                 # 回写目标（raw 与 data）
                 self.datasets[target_dataset]['raw_data'] = target_df.copy()
                 self.datasets[target_dataset]['data'] = target_df.copy()
-                
-                # 更新meta信息：为新增的目标变量添加标签
-                target_entry = self.datasets[target_dataset]
-                if 'meta' in target_entry and hasattr(target_entry['meta'], 'column_labels'):
-                    if isinstance(target_entry['meta'].column_labels, dict):
-                        # 如果目标变量还没有标签，为其设置一个描述性标签
-                        if target_var not in target_entry['meta'].column_labels:
-                            source_labels = []
-                            for src in sources_desc:
-                                src_dataset = src.get('dataset')
-                                src_col = src.get('column')
-                                if src_dataset and src_col and src_dataset in self.datasets:
-                                    src_entry = self.datasets[src_dataset]
-                                    if 'meta' in src_entry and hasattr(src_entry['meta'], 'column_labels'):
-                                        if isinstance(src_entry['meta'].column_labels, dict):
-                                            src_label = src_entry['meta'].column_labels.get(src_col, src_col)
-                                            if src_label and src_label != src_col:
-                                                source_labels.append(src_label)
-                            
-                            # 生成合并后的标签
-                            if source_labels:
-                                merged_label = ' + '.join(source_labels)
-                                target_entry['meta'].column_labels[target_var] = merged_label
-                                print(f'为合并变量 {target_var} 设置标签: {merged_label}')
-                            else:
-                                target_entry['meta'].column_labels[target_var] = f'合并变量: {target_var}'
-                                print(f'为合并变量 {target_var} 设置默认标签')
 
                 # 从各SUPP原始结构中删除已合并的 QNAM，并同步更新其转置预览
                 for supp_ds, qnams in supp_to_drop_map.items():
@@ -1469,89 +1900,13 @@ class SASDataProcessor:
 
                 # 重新构建主表预览视图
                 self._build_preview_views()
-                
-                # 自动将所有SUPP数据集中的QNAM转置并合并到对应的主数据集中
-                self._auto_merge_all_supp_data()
 
-            if progress_callback:
-                progress_callback("合并配置完成", 100)
-            
-            # 标记已执行合并配置
-            self.merge_executed = True
-            
             return True, "变量合并成功"
         except Exception as e:
             # 将异常同时打印到控制台，便于调试
             print('merge_variables error:', e)
             return False, f"变量合并失败: {str(e)}"
 
-    def _auto_merge_all_supp_data(self) -> None:
-        """自动将所有SUPP数据集中的QNAM转置并合并到对应的主数据集中"""
-        try:
-            # 如果已经合并过SUPP数据，则跳过
-            if self.supp_merged:
-                print('SUPP数据已经合并过，跳过重复合并')
-                return
-                
-            # 获取所有SUPP数据集
-            supp_datasets = {name: data for name, data in self.datasets.items() if name.upper().startswith('SUPP')}
-            
-            for supp_name, supp_entry in supp_datasets.items():
-                supp_df = supp_entry.get('raw_data', supp_entry['data']).copy()
-                
-                # 检查必要的列
-                if 'QNAM' not in supp_df.columns or 'QVAL' not in supp_df.columns:
-                    continue
-                    
-                # 按RDOMAIN分组处理
-                if 'RDOMAIN' in supp_df.columns:
-                    for rdomain in supp_df['RDOMAIN'].dropna().unique():
-                        rdomain_str = str(rdomain).upper()
-                        
-                        # 找到对应的主数据集
-                        target_dataset = None
-                        for ds_name in self.datasets.keys():
-                            if ds_name.upper() == rdomain_str and not ds_name.upper().startswith('SUPP'):
-                                target_dataset = ds_name
-                                break
-                        
-                        if not target_dataset:
-                            continue
-                            
-                        # 获取该RDOMAIN的SUPP数据
-                        rdomain_supp = supp_df[supp_df['RDOMAIN'].astype(str).str.upper() == rdomain_str].copy()
-                        
-                        if rdomain_supp.empty:
-                            continue
-                            
-                        # 调用现有的SUPP合并方法
-                        self._merge_supp_data(supp_name, target_dataset, rdomain_supp)
-            
-            # 标记SUPP数据已合并
-            self.supp_merged = True
-            print(f'SUPP数据合并完成，共处理 {len(supp_datasets)} 个SUPP数据集')
-            
-            # 添加详细的合并后数据状态调试信息
-            print('=== SUPP数据合并后的数据状态检查 ===')
-            for ds_name, ds_info in self.datasets.items():
-                if not ds_name.upper().startswith('SUPP'):
-                    df = ds_info['data']
-                    print(f'主数据集 {ds_name}: 行数={len(df)}, 列数={len(df.columns)}')
-                    # 检查是否有来自SUPP的新列
-                    extra_meta = ds_info.get('extra_meta', {})
-                    supp_origin_map = extra_meta.get('supp_origin_map', {})
-                    if supp_origin_map:
-                        print(f'  来自SUPP的新列: {list(supp_origin_map.keys())}')
-                        # 检查这些列的数据填充情况
-                        for col_name in supp_origin_map.keys():
-                            if col_name in df.columns:
-                                non_null_count = df[col_name].notna().sum()
-                                print(f'    {col_name}: 非空值数量={non_null_count}/{len(df)}')
-            print('=== SUPP数据合并状态检查完成 ===')
-                        
-        except Exception as e:
-            print(f'_auto_merge_all_supp_data error: {e}')
-    
     def _refresh_main_from_supp(self, supp_name: str, affected_qnams: set) -> None:
         """将指定 SUPP 的受影响 QNAM 刷新到各主表已存在的映射列（覆盖写入）。"""
         supp_entry = self.datasets.get(supp_name)
@@ -1619,34 +1974,19 @@ def read_datasets():
     if not directory_path or not os.path.exists(directory_path):
         return jsonify({'success': False, 'message': '路径不存在或为空'})
     
-    # 创建进度追踪任务
-    task_id = create_progress_task('数据读取')
+    # 设置翻译方向
+    processor.translation_direction = translation_direction
+    success, message = processor.read_sas_files(directory_path, mode)
     
-    def progress_callback(current, total, message):
-        """进度回调函数"""
-        progress = int((current / total) * 100) if total > 0 else 0
-        update_progress(task_id, progress, message)
-    
-    try:
-        # 设置翻译方向
-        processor.translation_direction = translation_direction
-        success, message = processor.read_sas_files(directory_path, mode, progress_callback=progress_callback)
-        
-        if success:
-            complete_progress(task_id, '数据读取完成')
-            datasets_info = processor.get_all_datasets_info()
-            return jsonify({
-                'success': True,
-                'message': message,
-                'datasets': datasets_info,
-                'task_id': task_id
-            })
-        else:
-            fail_progress(task_id, f'数据读取失败: {message}')
-            return jsonify({'success': False, 'message': message, 'task_id': task_id})
-    except Exception as e:
-        fail_progress(task_id, f'数据读取异常: {str(e)}')
-        return jsonify({'success': False, 'message': str(e), 'task_id': task_id})
+    if success:
+        datasets_info = processor.get_all_datasets_info()
+        return jsonify({
+            'success': True,
+            'message': message,
+            'datasets': datasets_info
+        })
+    else:
+        return jsonify({'success': False, 'message': message})
 
 @app.route('/get_dataset/<dataset_name>')
 def get_dataset(dataset_name):
@@ -1794,37 +2134,26 @@ def execute_merge():
         merge_config = data.get('merge_config', [])
         translation_config = data.get('translation_config', {})
         
-        # 创建进度追踪任务
-        task_id = create_progress_task('合并配置执行')
-        
-        def progress_callback(message, progress):
-            """进度回调函数"""
-            update_progress(task_id, progress, message)
-        
         # 设置翻译方向
         translation_direction = translation_config.get('translation_direction', 'zh_to_en')
         processor.translation_direction = translation_direction
         
         # 执行合并
-        success, message = processor.merge_variables(merge_config, progress_callback=progress_callback)
+        success, message = processor.merge_variables(merge_config)
         
         if success:
-            complete_progress(task_id, '合并配置执行完成')
             # 获取处理后的数据集信息
             datasets_info = processor.get_all_datasets_info()
             return jsonify({
                 'success': True,
                 'message': message,
-                'data': datasets_info,
-                'task_id': task_id
+                'data': datasets_info
             })
         else:
-            fail_progress(task_id, f'合并配置执行失败: {message}')
-            return jsonify({'success': False, 'message': message, 'task_id': task_id}), 500
+            return jsonify({'success': False, 'message': message}), 500
             
     except Exception as e:
-        fail_progress(task_id, f'合并配置执行异常: {str(e)}')
-        return jsonify({'success': False, 'message': str(e), 'task_id': task_id}), 500
+        return jsonify({'success': False, 'message': str(e)}), 500
 
 @app.route('/save_merge_config', methods=['POST'])
 def save_merge_config():
@@ -1841,10 +2170,7 @@ def save_merge_config():
         else:
             return jsonify({'success': False, 'message': '保存失败'}), 500
     except Exception as e:
-        print(f"生成非编码清单时发生错误: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        return jsonify({'success': False, 'message': f'生成非编码清单失败: {str(e)}'}), 500
+        return jsonify({'success': False, 'message': str(e)}), 500
 
 @app.route('/api/load_merge_config', methods=['GET'])
 def load_merge_config():
@@ -1998,29 +2324,21 @@ def check_existing_library():
 def get_meddra_versions():
     """获取MedDRA版本列表"""
     try:
-        conn = sqlite3.connect(db_manager.db_path)
-        cursor = conn.cursor()
-        
-        # 直接从meddra_merged表中获取version字段的非重复值
-        cursor.execute('SELECT DISTINCT version FROM meddra_merged WHERE version IS NOT NULL ORDER BY version')
-        versions = cursor.fetchall()
-        
+        # 从数据库中获取MedDRA表信息
+        tables = db_manager.get_database_tables()
         meddra_versions = []
-        for version_row in versions:
-            version = version_row[0]
+        
+        for table in tables.get('meddra', []):
+            # 从表名或描述中提取版本信息
+            version = table.get('name', '').replace('meddra_', '').replace('_', '.')
             if version:
-                # 获取该版本的记录数
-                cursor.execute('SELECT COUNT(*) FROM meddra_merged WHERE version = ?', (version,))
-                count = cursor.fetchone()[0]
-                
                 meddra_versions.append({
                     'version': version,
-                    'name': f'MedDRA {version}',
-                    'description': f'MedDRA版本 {version}',
-                    'record_count': count
+                    'name': table.get('name', ''),
+                    'description': table.get('description', ''),
+                    'record_count': table.get('record_count', 0)
                 })
         
-        conn.close()
         return jsonify({'versions': meddra_versions})
     except Exception as e:
         return jsonify({'versions': [], 'error': str(e)})
@@ -2029,29 +2347,21 @@ def get_meddra_versions():
 def get_whodrug_versions():
     """获取WHODrug版本列表"""
     try:
-        conn = sqlite3.connect(db_manager.db_path)
-        cursor = conn.cursor()
-        
-        # 直接从whodrug_merged表中获取version字段的非重复值
-        cursor.execute('SELECT DISTINCT version FROM whodrug_merged WHERE version IS NOT NULL ORDER BY version')
-        versions = cursor.fetchall()
-        
+        # 从数据库中获取WHODrug表信息
+        tables = db_manager.get_database_tables()
         whodrug_versions = []
-        for version_row in versions:
-            version = version_row[0]
+        
+        for table in tables.get('whodrug', []):
+            # 从表名或描述中提取版本信息
+            version = table.get('name', '').replace('whodrug_', '').replace('_', '.')
             if version:
-                # 获取该版本的记录数
-                cursor.execute('SELECT COUNT(*) FROM whodrug_merged WHERE version = ?', (version,))
-                count = cursor.fetchone()[0]
-                
                 whodrug_versions.append({
                     'version': version,
-                    'name': f'WHODrug {version}',
-                    'description': f'WHODrug版本 {version}',
-                    'record_count': count
+                    'name': table.get('name', ''),
+                    'description': table.get('description', ''),
+                    'record_count': table.get('record_count', 0)
                 })
         
-        conn.close()
         return jsonify({'versions': whodrug_versions})
     except Exception as e:
         return jsonify({'versions': [], 'error': str(e)})
@@ -2237,387 +2547,6 @@ def is_ai_translation_eligible(value):
         return True
     return False
 
-@app.route('/api/generate_coded_list_preview', methods=['POST'])
-def generate_coded_list_preview():
-    """生成编码清单预览（仅数据库匹配，不执行AI翻译）"""
-    try:
-        data = request.get_json()
-        
-        # 验证必要字段
-        if not data.get('translation_direction') or not data.get('path'):
-            return jsonify({'success': False, 'message': '缺少必要的配置信息'}), 400
-        
-        path = data.get('path')
-        translation_direction = data.get('translation_direction')
-        page = data.get('page', 1)  # 页码，默认第1页
-        page_size = data.get('page_size', 100)  # 每页大小，默认100条
-        
-        # 获取翻译库配置
-        db_manager = DatabaseManager()
-        config = db_manager.get_translation_library_config(path)
-        
-        if not config:
-            return jsonify({'success': False, 'message': '未找到翻译库配置'}), 400
-        
-        meddra_config = config.get('meddra_config', [])
-        whodrug_config = config.get('whodrug_config', [])
-        meddra_version = config.get('meddra_version')
-        whodrug_version = config.get('whodrug_version')
-        
-        # 处理版本格式，从"27.1.english"格式提取"27.1"
-        if meddra_version and '.' in meddra_version:
-            # 提取版本号部分，去掉语言后缀
-            version_parts = meddra_version.split('.')
-            if len(version_parts) >= 2:
-                meddra_version = f"{version_parts[0]}.{version_parts[1]}"
-        
-        if whodrug_version:
-            # WHODrug版本格式处理：从"global.2025.mar.1.english"提取"2025 Mar 1"
-            if 'global.' in whodrug_version:
-                parts = whodrug_version.replace('global.', '').split('.')
-                if len(parts) >= 3:
-                    year = parts[0]
-                    month = parts[1].capitalize()
-                    day = parts[2]
-                    whodrug_version = f"{year} {month} {day}"
-        
-        # 检查合并状态
-        merge_status = processor.get_merge_status()
-        if not merge_status['supp_merged'] or not merge_status['merge_executed']:
-            error_msg = "请先完成以下步骤：\n"
-            if not merge_status['supp_merged']:
-                error_msg += f"1. 执行SUPP数据合并（当前SUPP数据集数量：{merge_status['supp_datasets_count']}）\n"
-                error_msg += f"2. 执行变量合并配置\n"
-                error_msg += f"当前状态：SUPP已合并={merge_status['supp_merged']}，配置已执行={merge_status['merge_executed']}"
-                return jsonify({'success': False, 'message': error_msg}), 400
-        
-        coded_items = []
-        # 用于去重的集合，存储 (数据集名称, 变量名称, 原始值) 的组合
-        processed_items = set()
-        
-        print(f'开始处理编码清单预览，MedDRA配置项: {len(meddra_config)}, WHODrug配置项: {len(whodrug_config)}')
-        
-        # 处理MedDRA配置的变量（仅数据库匹配）
-        for idx, meddra_item in enumerate(meddra_config):
-            print(f'处理MedDRA配置项 {idx+1}/{len(meddra_config)}: {meddra_item.get("name_column")}')
-            if meddra_item.get('name_column'):
-                variable_name = meddra_item['name_column']
-                code_variable = meddra_item.get('code_column')
-                
-                # 从合并数据中获取该变量的所有值
-                for dataset_name, dataset_info in processor.datasets.items():
-                    df = dataset_info['data']
-                    if variable_name in df.columns:
-                        unique_values = df[variable_name].dropna().unique()
-                        print(f'  数据集 {dataset_name} 中变量 {variable_name} 有 {len(unique_values)} 个唯一值')
-                        
-                        # 批量查询翻译数据以提高性能
-                        translation_dict = {}
-                        conn = sqlite3.connect('translation_db.sqlite')
-                        try:
-                            cursor = conn.cursor()
-                            
-                            # 确保每个配置项都被完整处理，避免并发问题
-                            print(f'    开始数据库查询，配置项: {variable_name}')
-                            
-                            if code_variable and code_variable in df.columns:
-                                # 有code列的情况，直接使用code列的值进行匹配
-                                unique_codes = df[code_variable].dropna().unique()
-                                # 处理code值格式，将浮点数转换为整数字符串
-                                processed_codes = []
-                                for code in unique_codes:
-                                    if pd.notna(code):
-                                        try:
-                                            if isinstance(code, float) and code.is_integer():
-                                                processed_codes.append(str(int(code)))
-                                            else:
-                                                processed_codes.append(str(code).strip())
-                                        except:
-                                            processed_codes.append(str(code).strip())
-                                
-                                placeholders = ','.join(['?' for _ in processed_codes])
-                                if translation_direction == 'zh_to_en':
-                                    cursor.execute(f"""
-                                        SELECT code, name_en 
-                                        FROM meddra_merged 
-                                        WHERE code IN ({placeholders}) AND version = ?
-                                    """, processed_codes + [meddra_version])
-                                else:
-                                    cursor.execute(f"""
-                                        SELECT code, name_cn 
-                                        FROM meddra_merged 
-                                        WHERE code IN ({placeholders}) AND version = ?
-                                    """, processed_codes + [meddra_version])
-                                
-                                for code, translation in cursor.fetchall():
-                                    if translation and translation.strip():
-                                        translation_dict[str(code).strip()] = translation.strip()
-                            else:
-                                # 没有code列的情况，使用name进行匹配
-                                placeholders = ','.join(['?' for _ in unique_values])
-                                if translation_direction == 'zh_to_en':
-                                    cursor.execute(f"""
-                                        SELECT name_cn, name_en 
-                                        FROM meddra_merged 
-                                        WHERE name_cn IN ({placeholders}) AND version = ?
-                                    """, unique_values.tolist() + [meddra_version])
-                                else:
-                                    cursor.execute(f"""
-                                        SELECT name_en, name_cn 
-                                        FROM meddra_merged 
-                                        WHERE name_en IN ({placeholders}) AND version = ?
-                                    """, unique_values.tolist() + [meddra_version])
-                                
-                                for term, translation in cursor.fetchall():
-                                    if translation and translation.strip():
-                                        translation_dict[term] = translation.strip()
-                        finally:
-                            conn.close()
-                        
-                        # 处理每个唯一值
-                        for value in unique_values:
-                            if pd.isna(value) or str(value).strip() == '':
-                                continue
-                            
-                            value_str = str(value).strip()
-                            item_key = (dataset_name, variable_name, value_str)
-                            
-                            if item_key in processed_items:
-                                continue
-                            processed_items.add(item_key)
-                            
-                            # 查找翻译和获取code值
-                            translated_value = ''
-                            translation_source = 'none'
-                            code_value = ''
-                            
-                            if code_variable and code_variable in df.columns:
-                                # 获取对应的code值
-                                code_values = df[df[variable_name] == value][code_variable].dropna().unique()
-                                if len(code_values) > 0:
-                                    raw_code = code_values[0]
-                                    # 处理数字类型的code值，去除.0后缀
-                                    if pd.notna(raw_code):
-                                        try:
-                                            # 如果是浮点数且为整数值，转换为整数字符串
-                                            if isinstance(raw_code, float) and raw_code.is_integer():
-                                                code_value = str(int(raw_code))
-                                            else:
-                                                code_value = str(raw_code).strip()
-                                        except:
-                                            code_value = str(raw_code).strip()
-                                    
-                                    if code_value in translation_dict:
-                                        translated_value = translation_dict[code_value]
-                                        translation_source = 'meddra_database'
-                            else:
-                                # 直接使用term匹配
-                                if value_str in translation_dict:
-                                    translated_value = translation_dict[value_str]
-                                    translation_source = 'meddra_database'
-                            
-                            # 添加所有项目，包括未匹配的
-                            coded_items.append({
-                                'dataset': dataset_name,
-                                'variable': variable_name,
-                                'value': value_str,
-                                'code': code_value,  # 添加code字段
-                                'translated_value': translated_value,
-                                'translation_source': translation_source,
-                                'needs_confirmation': 'Y' if not translated_value else 'N',
-                                'coding_type': 'MedDRA'
-                            })
-        
-        print(f'MedDRA配置处理完成，当前编码清单项目数: {len(coded_items)}')
-
-        # 处理WHODrug配置的变量（仅数据库匹配）
-        for idx, whodrug_item in enumerate(whodrug_config):
-            print(f'处理WHODrug配置项 {idx+1}/{len(whodrug_config)}: {whodrug_item.get("name_column")}')
-            if whodrug_item.get('name_column'):
-                variable_name = whodrug_item['name_column']
-                code_variable = whodrug_item.get('code_column')
-                
-                # 从合并数据中获取该变量的所有值
-                for dataset_name, dataset_info in processor.datasets.items():
-                    df = dataset_info['data']
-                    if variable_name in df.columns:
-                        unique_values = df[variable_name].dropna().unique()
-                        print(f'  数据集 {dataset_name} 中变量 {variable_name} 有 {len(unique_values)} 个唯一值')
-                        
-                        # 批量查询翻译数据以提高性能
-                        translation_dict = {}
-                        conn = sqlite3.connect('translation_db.sqlite')
-                        try:
-                            cursor = conn.cursor()
-                            
-                            # 确保每个配置项都被完整处理
-                            print(f'    开始数据库查询，配置项: {variable_name}')
-                            if code_variable and code_variable in df.columns:
-                                # 有code列的情况，直接使用code列的值进行匹配
-                                unique_codes = df[code_variable].dropna().unique()
-                                # 处理code值的格式，确保是字符串
-                                processed_codes = []
-                                for code in unique_codes:
-                                    if pd.isna(code):
-                                        continue
-                                    # 如果是浮点数，转换为整数再转为字符串
-                                    if isinstance(code, float) and code.is_integer():
-                                        processed_codes.append(str(int(code)))
-                                    else:
-                                        processed_codes.append(str(code))
-                                
-                                if processed_codes:
-                                    placeholders = ','.join(['?' for _ in processed_codes])
-                                    if translation_direction == 'zh_to_en':
-                                        cursor.execute(f"""
-                                            SELECT code, name_en 
-                                            FROM whodrug_merged 
-                                            WHERE code IN ({placeholders}) AND version = ?
-                                        """, processed_codes + [whodrug_version])
-                                    else:
-                                        cursor.execute(f"""
-                                            SELECT code, name_cn 
-                                            FROM whodrug_merged 
-                                            WHERE code IN ({placeholders}) AND version = ?
-                                        """, processed_codes + [whodrug_version])
-                                    
-                                    for code, translation in cursor.fetchall():
-                                        if translation and translation.strip():
-                                            translation_dict[str(code)] = translation.strip()
-                            else:
-                                # 没有code列的情况，使用name进行匹配
-                                placeholders = ','.join(['?' for _ in unique_values])
-                                if translation_direction == 'zh_to_en':
-                                    cursor.execute(f"""
-                                        SELECT name_cn, name_en 
-                                        FROM whodrug_merged 
-                                        WHERE name_cn IN ({placeholders}) AND version = ?
-                                    """, unique_values.tolist() + [whodrug_version])
-                                else:
-                                    cursor.execute(f"""
-                                        SELECT name_en, name_cn 
-                                        FROM whodrug_merged 
-                                        WHERE name_en IN ({placeholders}) AND version = ?
-                                    """, unique_values.tolist() + [whodrug_version])
-                                
-                                for name, translation in cursor.fetchall():
-                                    if translation and translation.strip():
-                                        translation_dict[name] = translation.strip()
-                        finally:
-                            conn.close()
-                        
-                        # 处理每个唯一值
-                        for value in unique_values:
-                            if pd.isna(value) or str(value).strip() == '':
-                                continue
-                            
-                            value_str = str(value).strip()
-                            item_key = (dataset_name, variable_name, value_str)
-                            
-                            if item_key in processed_items:
-                                continue
-                            processed_items.add(item_key)
-                            
-                            # 查找翻译和获取code值
-                            translated_value = ''
-                            translation_source = 'none'
-                            code_value = ''
-
-                            if code_variable and code_variable in df.columns:
-                                # 获取对应的code值
-                                code_values = df[df[variable_name] == value][code_variable].dropna().unique()
-                                if len(code_values) > 0:
-                                    raw_code = code_values[0]
-                                    # 处理数字类型的code值，去除.0后缀
-                                    if pd.notna(raw_code):
-                                        try:
-                                            # 如果是浮点数且为整数值，转换为整数字符串
-                                            if isinstance(raw_code, float) and raw_code.is_integer():
-                                                code_value = str(int(raw_code))
-                                            else:
-                                                code_value = str(raw_code).strip()
-                                        except:
-                                            code_value = str(raw_code).strip()
-                                    
-                                    if code_value in translation_dict:
-                                        translated_value = translation_dict[code_value]
-                                        translation_source = 'whodrug_database'
-                            else:
-                                # 直接使用drug_name匹配
-                                if value_str in translation_dict:
-                                    translated_value = translation_dict[value_str]
-                                    translation_source = 'whodrug_database'
-                            
-                            # 添加所有项目，包括未匹配的
-                            coded_items.append({
-                                'dataset': dataset_name,
-                                'variable': variable_name,
-                                'value': value_str,
-                                'code': code_value,  # 添加code字段
-                                'translated_value': translated_value,
-                                'translation_source': translation_source,
-                                'needs_confirmation': 'Y' if not translated_value else 'N',
-                                'coding_type': 'WHODrug'
-                            })
-        
-        print(f'WHODrug配置处理完成，当前编码清单项目数: {len(coded_items)}')
-        print(f'编码清单预览生成完成，共{len(coded_items)}项（包含所有项目）')
-        
-        # 统计各类型项目数量
-        meddra_items = [item for item in coded_items if item['coding_type'] == 'MedDRA']
-        whodrug_items = [item for item in coded_items if item['coding_type'] == 'WHODrug']
-        matched_items = [item for item in coded_items if item['translated_value']]
-        
-        print(f'  - MedDRA项目: {len(meddra_items)}')
-        print(f'  - WHODrug项目: {len(whodrug_items)}')
-        print(f'  - 数据库匹配项目: {len(matched_items)}')
-        
-        # 对编码清单进行排序：按数据集、变量名、原始值、code列排序
-        coded_items.sort(key=lambda x: (
-            x.get('dataset', ''),
-            x.get('variable', ''),
-            x.get('value', ''),
-            x.get('code', '')
-        ))
-        
-        # 计算分页
-        total_items = len(coded_items)
-        total_pages = (total_items + page_size - 1) // page_size
-        start_idx = (page - 1) * page_size
-        end_idx = start_idx + page_size
-        paginated_items = coded_items[start_idx:end_idx]
-        
-        print(f'返回第{page}页（{len(paginated_items)}项），共{total_pages}页')
-        
-        # 返回结果
-        return jsonify({
-            'success': True,
-            'data': paginated_items,
-            'translation_direction': translation_direction,  # 添加配置信息
-            'path': path,  # 添加配置信息
-            'pagination': {
-                'current_page': page,
-                'page_size': page_size,
-                'total_count': total_items,
-                'total_pages': total_pages,
-                'has_prev': page > 1,
-                'has_next': page < total_pages
-            },
-            'summary': {
-                'total_items': total_items,
-                'database_matched_items': len([item for item in coded_items if item['translated_value']]),
-                'ai_translated_items': 0,  # 预览版本不包含AI翻译
-                'meddra_items': len([item for item in coded_items if item['coding_type'] == 'MedDRA']),
-                'whodrug_items': len([item for item in coded_items if item['coding_type'] == 'WHODrug'])
-            }
-        })
-        
-    except Exception as e:
-        print(f'生成编码清单预览时出错: {str(e)}')
-        import traceback
-        traceback.print_exc()
-        return jsonify({'success': False, 'message': f'生成编码清单预览失败: {str(e)}'}), 500
-
 @app.route('/api/generate_coded_list', methods=['POST'])
 def generate_coded_list():
     """生成编码清单"""
@@ -2631,6 +2560,19 @@ def generate_coded_list():
         path = data.get('path')
         translation_direction = data.get('translation_direction')
         
+        # 初始化进度跟踪
+        progress_info = {
+            'total_datasets': 0,
+            'processed_datasets': 0,
+            'total_items': 0,
+            'processed_items': 0,
+            'current_stage': '获取配置信息',
+            'current_dataset': '',
+            'db_matched': 0,
+            'ai_processing': 0,
+            'ai_completed': 0
+        }
+        
         # 获取翻译库配置
         db_manager = DatabaseManager()
         config = db_manager.get_translation_library_config(path)
@@ -2642,6 +2584,10 @@ def generate_coded_list():
         whodrug_config = config.get('whodrug_config', [])
         meddra_version = config.get('meddra_version')
         whodrug_version = config.get('whodrug_version')
+        
+        # 更新进度：计算总数据集数量
+        progress_info['total_datasets'] = len(meddra_config) + len(whodrug_config)
+        progress_info['current_stage'] = '加载数据集'
         
         # 处理版本格式，从"27.1.english"格式提取"27.1"
         if meddra_version and '.' in meddra_version:
@@ -2663,40 +2609,16 @@ def generate_coded_list():
         print(f'处理后的版本信息 - MedDRA: {meddra_version}, WHODrug: {whodrug_version}')
         
         # 使用全局processor实例获取合并后的数据
-        # 检查是否已经加载了数据，如果没有数据或路径不匹配才重新读取
-        if not processor.datasets or processor.current_path != path:
-            print(f'processor.datasets为空或路径不匹配，开始读取SAS文件: {path}')
-            print(f'当前processor状态: supp_merged={processor.supp_merged}, merge_executed={processor.merge_executed}')
-            success, message = processor.read_sas_files(path, mode='SDTM')  # 使用SDTM模式以启用SUPP数据合并
+        # 检查是否已经加载了相同路径的数据
+        if not processor.datasets or getattr(processor, 'current_path', None) != path:
+            print(f'开始读取SAS文件: {path}')
+            success, message = processor.read_sas_files(path, mode='SDTM')
             if not success:
                 return jsonify({'success': False, 'message': f'读取SAS文件失败: {message}'}), 500
             processor.current_path = path  # 记录当前路径
             print(f'SAS文件读取完成，共加载 {len(processor.datasets)} 个数据集')
-            print(f'读取后processor状态: supp_merged={processor.supp_merged}, merge_executed={processor.merge_executed}')
-            
-            # 检查是否使用了原始数据而非合并配置后的数据
-            if not processor.has_merged_data():
-                merge_status = processor.get_merge_status()
-                error_msg = f"检测到使用原始数据集，未执行合并配置。请先执行以下操作之一：\n"
-                error_msg += f"1. 执行SUPP数据合并（当前SUPP数据集数量：{merge_status['supp_datasets_count']}）\n"
-                error_msg += f"2. 执行变量合并配置\n"
-                error_msg += f"当前状态：SUPP已合并={merge_status['supp_merged']}，配置已执行={merge_status['merge_executed']}"
-                return jsonify({'success': False, 'message': error_msg}), 400
-        else:
-            print(f'使用已存在的processor数据，共 {len(processor.datasets)} 个数据集（包含合并后的数据）')
-            print(f'当前processor状态: supp_merged={processor.supp_merged}, merge_executed={processor.merge_executed}')
-            # 路径匹配且有数据，验证是否使用了合并配置后的数据
-            if not processor.has_merged_data():
-                merge_status = processor.get_merge_status()
-                error_msg = f"当前数据集未经过合并配置处理。请先执行以下操作之一：\n"
-                error_msg += f"1. 执行SUPP数据合并（当前SUPP数据集数量：{merge_status['supp_datasets_count']}）\n"
-                error_msg += f"2. 执行变量合并配置\n"
-                error_msg += f"当前状态：SUPP已合并={merge_status['supp_merged']}，配置已执行={merge_status['merge_executed']}"
-                return jsonify({'success': False, 'message': error_msg}), 400
         
         coded_items = []
-        # 用于去重的集合，存储 (数据集名称, 变量名称, 原始值) 的组合
-        processed_items = set()
         # 统一收集所有未匹配的项目，用于批量AI翻译
         unmatched_items = {
             'meddra': [],  # MedDRA未匹配项目
@@ -2705,414 +2627,695 @@ def generate_coded_list():
         
         print(f'开始处理编码清单，MedDRA配置项: {len(meddra_config)}, WHODrug配置项: {len(whodrug_config)}')
         
-        # 处理MedDRA配置的变量
-        for idx, meddra_item in enumerate(meddra_config):
-            print(f'处理MedDRA配置项 {idx+1}/{len(meddra_config)}: {meddra_item.get("name_column")}')
-            if meddra_item.get('name_column'):
-                variable_name = meddra_item['name_column']
-                code_variable = meddra_item.get('code_column')
+        # 批量处理MedDRA配置的变量 - 移除循环，使用pandas向量化操作
+        if meddra_config:
+            print(f'开始批量处理 {len(meddra_config)} 个MedDRA配置项')
+            
+            # 使用pandas DataFrame批量处理配置
+            import pandas as pd
+            meddra_df = pd.DataFrame(meddra_config)
+            meddra_df['translation_direction'] = config.get('translation_direction', 'zh_to_en')
+            
+            # 批量验证数据集存在性
+            meddra_df['dataset_exists'] = meddra_df['table_path'].isin(processor.datasets.keys())
+            valid_meddra_configs = meddra_df[meddra_df['dataset_exists']].copy()
+            
+            if len(valid_meddra_configs) == 0:
+                print('  ❌ 没有有效的MedDRA配置项')
+            else:
+                print(f'  ✅ 找到 {len(valid_meddra_configs)} 个有效的MedDRA配置项')
                 
-                # 从合并数据中获取该变量的所有值
-                for dataset_name, dataset_info in processor.datasets.items():
-                    df = dataset_info['data']
-                    if variable_name in df.columns:
-                        unique_values = df[variable_name].dropna().unique()
-                        # 不再限制处理的唯一值数量，处理所有数据
-                        print(f'  数据集 {dataset_name} 中变量 {variable_name} 有 {len(unique_values)} 个唯一值')
+                # 预加载所有需要的数据集
+                unique_datasets = valid_meddra_configs['table_path'].unique()
+                dataset_cache = {}
+                for ds_name in unique_datasets:
+                    if ds_name in processor.datasets:
+                        dataset_info = processor.datasets[ds_name]
+                        dataset_cache[ds_name] = dataset_info.get('data_view', dataset_info['data'])
+                
+                # 批量收集所有唯一值和代码映射
+                all_unique_values = set()
+                all_code_values = set()
+                config_value_mappings = []
+                
+                # 使用向量化操作处理每个配置
+                for _, config_row in valid_meddra_configs.iterrows():
+                    dataset_name = config_row['table_path']
+                    variable_name = config_row['name_column']
+                    code_variable = config_row['code_column']
+                    
+                    if dataset_name not in dataset_cache:
+                        continue
                         
-                        print(f'    处理 {len(unique_values)} 个唯一值...')
+                    df = dataset_cache[dataset_name]
+                    
+                    if variable_name not in df.columns:
+                        print(f'  ❌ 变量 {variable_name} 在数据集 {dataset_name} 中不存在，跳过')
+                        continue
+                    
+                    # 获取唯一值（限制数量）
+                    unique_values = df[variable_name].dropna().unique()[:10000]
+                    
+                    if len(unique_values) == 0:
+                        continue
+                    
+                    # 构建值-代码映射
+                    value_code_map = {}
+                    if code_variable and code_variable in df.columns:
+                        # 使用pandas向量化操作构建映射
+                        temp_df = df[[variable_name, code_variable]].drop_duplicates()
+                        temp_df = temp_df[temp_df[variable_name].isin(unique_values)]
                         
-                        # 批量查询翻译数据以提高性能
-                        translation_dict = {}
-                        conn = sqlite3.connect('translation_db.sqlite')
-                        try:
-                            cursor = conn.cursor()
-                            if code_variable and code_variable in df.columns:
-                                # 有code列的情况，直接使用code列的值进行匹配
-                                # 获取code列的唯一值
-                                code_unique_values = df[code_variable].dropna().unique()
+                        # 处理代码值格式
+                        temp_df[code_variable] = temp_df[code_variable].apply(
+                            lambda x: str(int(x)) if isinstance(x, float) and pd.notna(x) and x == int(x) else str(x) if pd.notna(x) else None
+                        )
+                        
+                        value_code_map = dict(zip(temp_df[variable_name].astype(str), temp_df[code_variable]))
+                        all_code_values.update(value_code_map.values())
+                    
+                    all_unique_values.update([str(v) for v in unique_values])
+                    
+                    config_value_mappings.append({
+                        'dataset_name': dataset_name,
+                        'variable_name': variable_name,
+                        'code_variable': code_variable,
+                        'unique_values': [str(v) for v in unique_values],
+                        'value_code_map': value_code_map
+                    })
+                
+                print(f'  📊 收集到 {len(all_unique_values)} 个唯一值，{len(all_code_values)} 个代码值')
+                
+                # 批量数据库查询
+                translation_dict = {}
+                try:
+                    conn = sqlite3.connect('translation_db.sqlite')
+                    
+                    # 检查表存在性
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='meddra_merged'")
+                    if not cursor.fetchone():
+                        print('    ❌ meddra_merged表不存在')
+                    else:
+                        # 批量查询基于代码的翻译
+                        if all_code_values:
+                            code_list = [code for code in all_code_values if code]
+                            if code_list:
+                                placeholders = ','.join(['?'] * len(code_list))
+                                query = f"SELECT code, name_cn, name_en FROM meddra_merged WHERE code IN ({placeholders}) AND version = ?"
                                 
-                                if len(code_unique_values) > 0:
-                                    # 处理code值格式，将浮点数转换为整数字符串
-                                    processed_codes = []
-                                    for code in code_unique_values:
-                                        if pd.notna(code):
-                                            try:
-                                                if isinstance(code, float) and code.is_integer():
-                                                    processed_codes.append(str(int(code)))
-                                                else:
-                                                    processed_codes.append(str(code).strip())
-                                            except:
-                                                processed_codes.append(str(code).strip())
-                                    
-                                    placeholders = ','.join(['?'] * len(processed_codes))
-                                    meddra_query = f"SELECT code, name_cn, name_en FROM meddra_merged WHERE code IN ({placeholders}) AND version = ?"
-                                    cursor.execute(meddra_query, processed_codes + [meddra_version])
-                                    
-                                    # 建立code到翻译的映射
-                                    code_to_translation = {}
-                                    for row in cursor.fetchall():
-                                        code, name_cn, name_en = row
-                                        if translation_direction == 'zh_to_en':
-                                            code_to_translation[str(code).strip()] = name_en
-                                        else:
-                                            code_to_translation[str(code).strip()] = name_cn
-                                    
-                                    # 为每个name值找到对应的code值，然后获取翻译
-                                for value in unique_values:
-                                    # 找到该name值对应的code值
-                                    matching_rows = df[df[variable_name] == value]
-                                    if len(matching_rows) > 0:
-                                        raw_code = matching_rows[code_variable].iloc[0]
-                                        # 处理数字类型的code值，去除.0后缀
-                                        if pd.notna(raw_code):
-                                            try:
-                                                if isinstance(raw_code, float) and raw_code.is_integer():
-                                                    code_value = str(int(raw_code))
-                                                else:
-                                                    code_value = str(raw_code).strip()
-                                            except:
-                                                code_value = str(raw_code).strip()
-                                        else:
-                                            code_value = ''
-                                        
-                                        if code_value in code_to_translation:
-                                            translation_dict[str(value)] = code_to_translation[code_value]
-                            else:
-                                # 只有name列的情况，批量查询name值
+                                meddra_code_df = pd.read_sql_query(query, conn, params=code_list + [meddra_version])
+                                print(f'    📊 代码查询结果: {len(meddra_code_df)} 条')
+                                
+                                # 构建代码到翻译的映射
+                                translation_direction = config.get('translation_direction', 'zh_to_en')
                                 if translation_direction == 'zh_to_en':
-                                    placeholders = ','.join(['?'] * len(unique_values))
-                                    meddra_query = f"SELECT name_cn, name_en FROM meddra_merged WHERE name_cn IN ({placeholders}) AND version = ?"
-                                    cursor.execute(meddra_query, [str(v) for v in unique_values] + [meddra_version])
-                                    for row in cursor.fetchall():
-                                        translation_dict[row[0]] = row[1]
+                                    code_trans_map = dict(zip(meddra_code_df['code'], meddra_code_df['name_en']))
                                 else:
-                                    placeholders = ','.join(['?'] * len(unique_values))
-                                    meddra_query = f"SELECT name_en, name_cn FROM meddra_merged WHERE name_en IN ({placeholders}) AND version = ?"
-                                    cursor.execute(meddra_query, [str(v) for v in unique_values] + [meddra_version])
-                                    for row in cursor.fetchall():
-                                        translation_dict[row[0]] = row[1]
-                        finally:
-                            conn.close()
+                                    code_trans_map = dict(zip(meddra_code_df['code'], meddra_code_df['name_cn']))
+                                
+                                # 将代码翻译映射到值翻译
+                                for mapping in config_value_mappings:
+                                    for value, code in mapping['value_code_map'].items():
+                                        if code in code_trans_map:
+                                            translation_dict[value] = code_trans_map[code]
                         
-                        # 处理每个唯一值
-                        for idx, value in enumerate(unique_values):
-                            if idx % 20 == 0:  # 每20个值显示一次进度
-                                print(f'      进度: {idx+1}/{len(unique_values)}')
+                        # 批量查询基于名称的翻译
+                        if all_unique_values:
+                            value_list = list(all_unique_values)
+                            placeholders = ','.join(['?'] * len(value_list))
                             
-                            # 检查是否需要翻译
-                            if not should_translate_value(value, translation_direction):
-                                continue
-                            
-                            # 获取对应的code值（如果有code列配置）
-                            code_value = ''
-                            if code_variable and code_variable in df.columns:
-                                matching_rows = df[df[variable_name] == value]
-                                if len(matching_rows) > 0:
-                                    raw_code = matching_rows[code_variable].iloc[0]
-                                    # 处理数字类型的code值，去除.0后缀
-                                    if pd.notna(raw_code):
-                                        try:
-                                            # 如果是浮点数且为整数值，转换为整数字符串
-                                            if isinstance(raw_code, float) and raw_code.is_integer():
-                                                code_value = str(int(raw_code))
-                                            else:
-                                                code_value = str(raw_code).strip()
-                                        except:
-                                            code_value = str(raw_code).strip()
-                            
-                            # 去重检查：按照数据集名称、变量名称、原始值和code值进行去重
-                            item_key = (dataset_name, variable_name, str(value), code_value)
-                            if item_key in processed_items:
-                                continue  # 跳过重复项
-                            processed_items.add(item_key)
-                            
-                            # 优先使用code值进行匹配，如果没有code值则使用name值匹配
-                            translated_value = ''
-                            if code_value and code_variable:
-                                # 有code值时，优先使用code值匹配
-                                translated_value = code_to_translation.get(code_value, '')
-                            
-                            if not translated_value:
-                                # code值匹配失败或没有code值时，使用name值匹配
-                                translated_value = translation_dict.get(str(value), '')
-                            
-                            if translated_value:
-                                translation_source = f'meddra_merged_{meddra_version}'
-                                needs_confirmation = 'N'
+                            translation_direction = config.get('translation_direction', 'zh_to_en')
+                            if translation_direction == 'zh_to_en':
+                                query = f"SELECT name_cn, name_en FROM meddra_merged WHERE name_cn IN ({placeholders}) AND version = ?"
+                                meddra_name_df = pd.read_sql_query(query, conn, params=value_list + [meddra_version])
+                                name_trans_map = dict(zip(meddra_name_df['name_cn'], meddra_name_df['name_en']))
                             else:
-                                # 收集未匹配项目，稍后统一AI翻译
-                                if is_ai_translation_eligible(value):
-                                    unmatched_items['meddra'].append({
-                                        'value': str(value),
-                                        'dataset': dataset_name,
-                                        'variable': variable_name,
-                                        'code': code_value,
-                                        'index': len(coded_items)
-                                    })
-                                translated_value = ''  # 暂时为空，稍后AI翻译
-                                translation_source = 'AI'
-                                needs_confirmation = 'Y'
+                                query = f"SELECT name_en, name_cn FROM meddra_merged WHERE name_en IN ({placeholders}) AND version = ?"
+                                meddra_name_df = pd.read_sql_query(query, conn, params=value_list + [meddra_version])
+                                name_trans_map = dict(zip(meddra_name_df['name_en'], meddra_name_df['name_cn']))
                             
-                            coded_items.append({
+                            print(f'    📊 名称查询结果: {len(name_trans_map)} 条')
+                            
+                            # 合并名称翻译（优先使用代码翻译）
+                            for value, trans in name_trans_map.items():
+                                if value not in translation_dict:
+                                    translation_dict[value] = trans
+                    
+                    conn.close()
+                    
+                except Exception as e:
+                    print(f'    ❌ 批量数据库查询错误: {e}')
+                    translation_dict = {}
+                
+                print(f'    📝 获得翻译映射: {len(translation_dict)} 条')
+                
+                # 批量处理翻译结果
+                matched_items = []
+                unmatched_items_list = []
+                
+                # 使用列表推导式批量生成结果
+                for mapping in config_value_mappings:
+                    dataset_name = mapping['dataset_name']
+                    variable_name = mapping['variable_name']
+                    
+                    # 更新进度
+                    progress_info['current_dataset'] = f'{dataset_name}.{variable_name}'
+                    
+                    for value in mapping['unique_values']:
+                        # 检查是否需要翻译
+                        if not should_translate_value(value, config.get('translation_direction', 'zh_to_en')):
+                            continue
+                        
+                        if value in translation_dict:
+                            # 匹配项
+                            matched_items.append({
                                 'dataset': dataset_name,
                                 'variable': variable_name,
-                                'value': str(value),
-                                'code': code_value,
-                                'translated_value': translated_value,
-                                'translation_source': translation_source,
-                                'needs_confirmation': needs_confirmation
+                                'value': value,
+                                'translated_value': translation_dict[value],
+                                'translation_source': f'MedDRA {meddra_version}',
+                                'translation_method': 'database',
+                                'dictionary_type': 'meddra',
+                                'dictionary_version': meddra_version,
+                                'needs_confirmation': 'N'
                             })
-        
-        # 处理WHODrug配置的变量
-        for idx, whodrug_item in enumerate(whodrug_config):
-            print(f'处理WHODrug配置项 {idx+1}/{len(whodrug_config)}: {whodrug_item.get("name_column")}')
-            if whodrug_item.get('name_column'):
-                variable_name = whodrug_item['name_column']
-                code_variable = whodrug_item.get('code_column')
-                
-                # 从合并数据中获取该变量的所有值
-                for dataset_name, dataset_info in processor.datasets.items():
-                    df = dataset_info['data']
-                    if variable_name in df.columns:
-                        unique_values = df[variable_name].dropna().unique()
-                        # 不再限制处理的唯一值数量，处理所有数据
-                        print(f'  数据集 {dataset_name} 中变量 {variable_name} 有 {len(unique_values)} 个唯一值')
-                        
-                        print(f'    处理 {len(unique_values)} 个唯一值...')
-                        
-                        # 批量查询翻译数据以提高性能
-                        translation_dict = {}
-                        conn = sqlite3.connect('translation_db.sqlite')
-                        try:
-                            cursor = conn.cursor()
-                            if code_variable and code_variable in df.columns:
-                                # 有code列的情况，直接使用code列的值进行匹配
-                                # 获取code列的唯一值
-                                code_unique_values = df[code_variable].dropna().unique()
-                                
-                                if len(code_unique_values) > 0:
-                                    # 处理code值格式，将浮点数转换为整数字符串
-                                    processed_codes = []
-                                    for code in code_unique_values:
-                                        if pd.notna(code):
-                                            try:
-                                                if isinstance(code, float) and code.is_integer():
-                                                    processed_codes.append(str(int(code)))
-                                                else:
-                                                    processed_codes.append(str(code).strip())
-                                            except:
-                                                processed_codes.append(str(code).strip())
-                                    
-                                    placeholders = ','.join(['?'] * len(processed_codes))
-                                    whodrug_query = f"SELECT code, name_cn, name_en FROM whodrug_merged WHERE code IN ({placeholders}) AND version = ?"
-                                    cursor.execute(whodrug_query, processed_codes + [whodrug_version])
-                                    
-                                    # 建立code到翻译的映射
-                                    code_to_translation = {}
-                                    for row in cursor.fetchall():
-                                        code, name_cn, name_en = row
-                                        if translation_direction == 'zh_to_en':
-                                            code_to_translation[str(code).strip()] = name_en
-                                        else:
-                                            code_to_translation[str(code).strip()] = name_cn
-                                    
-                                    # 为每个name值找到对应的code值，然后获取翻译
-                                for value in unique_values:
-                                    # 找到该name值对应的code值
-                                    matching_rows = df[df[variable_name] == value]
-                                    if len(matching_rows) > 0:
-                                        code_value = str(matching_rows[code_variable].iloc[0]).strip()
-                                        if code_value in code_to_translation:
-                                            translation_dict[str(value)] = code_to_translation[code_value]
-                            else:
-                                # 只有name列的情况，批量查询name值
-                                if translation_direction == 'zh_to_en':
-                                    placeholders = ','.join(['?'] * len(unique_values))
-                                    whodrug_query = f"SELECT name_cn, name_en FROM whodrug_merged WHERE name_cn IN ({placeholders}) AND version = ?"
-                                    cursor.execute(whodrug_query, [str(v) for v in unique_values] + [whodrug_version])
-                                    for row in cursor.fetchall():
-                                        translation_dict[row[0]] = row[1]
-                                else:
-                                    placeholders = ','.join(['?'] * len(unique_values))
-                                    whodrug_query = f"SELECT name_en, name_cn FROM whodrug_merged WHERE name_en IN ({placeholders}) AND version = ?"
-                                    cursor.execute(whodrug_query, [str(v) for v in unique_values] + [whodrug_version])
-                                    for row in cursor.fetchall():
-                                        translation_dict[row[0]] = row[1]
-                        finally:
-                            conn.close()
-                        
-                        # 处理每个唯一值
-                        for idx, value in enumerate(unique_values):
-                            if idx % 20 == 0:  # 每20个值显示一次进度
-                                print(f'      进度: {idx+1}/{len(unique_values)}')
-                            
-                            # 检查是否需要翻译
-                            if not should_translate_value(value, translation_direction):
-                                continue
-                            
-                            # 获取对应的code值（如果有code列配置）
-                            code_value = ''
-                            if code_variable and code_variable in df.columns:
-                                matching_rows = df[df[variable_name] == value]
-                                if len(matching_rows) > 0:
-                                    raw_code = matching_rows[code_variable].iloc[0]
-                                    # 处理数字类型的code值，去除.0后缀
-                                    if pd.notna(raw_code):
-                                        try:
-                                            # 如果是浮点数且为整数值，转换为整数字符串
-                                            if isinstance(raw_code, float) and raw_code.is_integer():
-                                                code_value = str(int(raw_code))
-                                            else:
-                                                code_value = str(raw_code).strip()
-                                        except:
-                                            code_value = str(raw_code).strip()
-                            
-                            # 去重检查：按照数据集名称、变量名称、原始值和code值进行去重
-                            item_key = (dataset_name, variable_name, str(value), code_value)
-                            if item_key in processed_items:
-                                continue  # 跳过重复项
-                            processed_items.add(item_key)
-                            
-                            # 优先使用code值进行匹配，如果没有code值则使用name值匹配
-                            translated_value = ''
-                            if code_value and code_variable:
-                                # 有code值时，优先使用code值匹配
-                                translated_value = code_to_translation.get(code_value, '')
-                            
-                            if not translated_value:
-                                # code值匹配失败或没有code值时，使用name值匹配
-                                translated_value = translation_dict.get(str(value), '')
-                            
-                            if translated_value:
-                                translation_source = 'whodrug_database'
-                                needs_confirmation = 'N'
-                            else:
-                                # 收集未匹配项目，稍后统一AI翻译
-                                if is_ai_translation_eligible(value):
-                                    unmatched_items['whodrug'].append({
-                                        'value': str(value),
-                                        'dataset': dataset_name,
-                                        'variable': variable_name,
-                                        'code': code_value,
-                                        'index': len(coded_items)
-                                    })
-                                translated_value = ''  # 暂时为空，稍后AI翻译
-                                translation_source = 'AI'
-                                needs_confirmation = 'Y'
-                            
-                            coded_items.append({
+                        else:
+                            # 未匹配项
+                            unmatched_items_list.append({
+                                'index': len(coded_items) + len(matched_items) + len(unmatched_items_list),
                                 'dataset': dataset_name,
                                 'variable': variable_name,
-                                'value': str(value),
-                                'code': code_value,
-                                'translated_value': translated_value,
-                                'translation_source': translation_source,
-                                'needs_confirmation': needs_confirmation
+                                'value': value,
+                                'dictionary_type': 'meddra',
+                                'dictionary_version': meddra_version
                             })
+                
+                # 批量添加到结果列表
+                coded_items.extend(matched_items)
+                unmatched_items['meddra'].extend(unmatched_items_list)
+                
+                # 批量添加未匹配项的占位符
+                placeholder_items = [
+                    {
+                        'dataset': item['dataset'],
+                        'variable': item['variable'],
+                        'value': item['value'],
+                        'translated_value': '',
+                        'translation_source': '未翻译',
+                        'translation_method': 'ai_pending',
+                        'dictionary_type': 'meddra',
+                        'dictionary_version': meddra_version,
+                        'needs_confirmation': 1
+                    }
+                    for item in unmatched_items_list
+                ]
+                coded_items.extend(placeholder_items)
+                
+                # 批量保存未翻译的值到数据库
+                if placeholder_items:
+                    print(f'    💾 批量保存 {len(placeholder_items)} 个未翻译的MedDRA值')
+                    try:
+                        for item in placeholder_items:
+                            db_manager.save_translation_result(
+                                path=path,
+                                translation_direction=config.get('translation_direction', 'zh_to_en'),
+                                translation_type='编码清单',
+                                dataset_name=item['dataset'],
+                                variable_name=item['variable'],
+                                original_value=item['value'],
+                                translated_value='',
+                                translation_source='未翻译',
+                                needs_confirmation=True,
+                                confidence_score=0.0
+                            )
+                    except Exception as e:
+                        print(f'    ❌ 批量保存未翻译值失败: {e}')
+                
+                # 批量保存翻译结果
+                if matched_items:
+                    print(f'    💾 批量保存 {len(matched_items)} 个MedDRA翻译结果')
+                    try:
+                        # 使用批量操作保存翻译结果
+                        for item in matched_items:
+                            db_manager.save_translation_result(
+                                path=path,
+                                translation_direction=config.get('translation_direction', 'zh_to_en'),
+                                translation_type='编码清单',
+                                dataset_name=item['dataset'],
+                                variable_name=item['variable'],
+                                original_value=item['value'],
+                                translated_value=item['translated_value'],
+                                translation_source=item['translation_source'],
+                                needs_confirmation=False,
+                                confidence_score=1.0
+                            )
+                    except Exception as e:
+                        print(f'    ❌ 批量保存翻译结果失败: {e}')
+                
+                print(f'  ✅ MedDRA批量处理完成: 数据库匹配 {len(matched_items)} 项，AI翻译队列 {len(unmatched_items_list)} 项')
+                
+                # 更新已处理数据集计数
+                progress_info['processed_datasets'] += len(valid_meddra_configs)
+        else:
+            print('  ⚠️ 没有MedDRA配置项需要处理')
+        
+        # 批量处理WHODrug配置的变量 - 移除循环，使用pandas向量化操作
+        if whodrug_config:
+            print(f'开始批量处理 {len(whodrug_config)} 个WHODrug配置项')
+            
+            # 使用pandas DataFrame批量处理配置
+            whodrug_df = pd.DataFrame(whodrug_config)
+            whodrug_df['translation_direction'] = config.get('translation_direction', 'zh_to_en')
+            
+            # 批量验证数据集存在性
+            whodrug_df['dataset_exists'] = whodrug_df['table_path'].isin(processor.datasets.keys())
+            valid_whodrug_configs = whodrug_df[whodrug_df['dataset_exists']].copy()
+            
+            if len(valid_whodrug_configs) == 0:
+                print('  ❌ 没有有效的WHODrug配置项')
+            else:
+                print(f'  ✅ 找到 {len(valid_whodrug_configs)} 个有效的WHODrug配置项')
+                
+                # 预加载所有需要的数据集
+                unique_datasets = valid_whodrug_configs['table_path'].unique()
+                dataset_cache = {}
+                for ds_name in unique_datasets:
+                    if ds_name in processor.datasets:
+                        dataset_info = processor.datasets[ds_name]
+                        dataset_cache[ds_name] = dataset_info.get('data_view', dataset_info['data'])
+                
+                # 批量收集所有唯一值和代码映射
+                all_unique_values = set()
+                all_code_values = set()
+                config_value_mappings = []
+                
+                # 使用向量化操作处理每个配置
+                for _, config_row in valid_whodrug_configs.iterrows():
+                    dataset_name = config_row['table_path']
+                    variable_name = config_row['name_column']
+                    code_variable = config_row['code_column']
+                    
+                    if dataset_name not in dataset_cache:
+                        continue
+                        
+                    df = dataset_cache[dataset_name]
+                    
+                    if variable_name not in df.columns:
+                        print(f'  ❌ 变量 {variable_name} 在数据集 {dataset_name} 中不存在，跳过')
+                        continue
+                    
+                    # 获取唯一值（限制数量）
+                    unique_values = df[variable_name].dropna().unique()[:10000]
+                    
+                    if len(unique_values) == 0:
+                        continue
+                    
+                    # 构建值-代码映射
+                    value_code_map = {}
+                    if code_variable and code_variable in df.columns:
+                        # 使用pandas向量化操作构建映射
+                        temp_df = df[[variable_name, code_variable]].drop_duplicates()
+                        temp_df = temp_df[temp_df[variable_name].isin(unique_values)]
+                        
+                        # 处理代码值格式
+                        temp_df[code_variable] = temp_df[code_variable].apply(
+                            lambda x: str(int(x)) if isinstance(x, float) and pd.notna(x) and x == int(x) else str(x) if pd.notna(x) else None
+                        )
+                        
+                        value_code_map = dict(zip(temp_df[variable_name].astype(str), temp_df[code_variable]))
+                        all_code_values.update(value_code_map.values())
+                    
+                    all_unique_values.update([str(v) for v in unique_values])
+                    
+                    config_value_mappings.append({
+                        'dataset_name': dataset_name,
+                        'variable_name': variable_name,
+                        'code_variable': code_variable,
+                        'unique_values': [str(v) for v in unique_values],
+                        'value_code_map': value_code_map
+                    })
+                
+                print(f'  📊 收集到 {len(all_unique_values)} 个唯一值，{len(all_code_values)} 个代码值')
+                
+                # 批量数据库查询
+                translation_dict = {}
+                try:
+                    conn = sqlite3.connect('translation_db.sqlite')
+                    
+                    # 检查表存在性
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='whodrug_merged'")
+                    if not cursor.fetchone():
+                        print('    ❌ whodrug_merged表不存在')
+                    else:
+                        # 批量查询基于代码的翻译
+                        if all_code_values:
+                            code_list = [code for code in all_code_values if code]
+                            if code_list:
+                                placeholders = ','.join(['?'] * len(code_list))
+                                query = f"SELECT code, name_cn, name_en FROM whodrug_merged WHERE code IN ({placeholders}) AND version = ?"
+                                
+                                whodrug_code_df = pd.read_sql_query(query, conn, params=code_list + [whodrug_version])
+                                print(f'    📊 代码查询结果: {len(whodrug_code_df)} 条')
+                                
+                                # 构建代码到翻译的映射
+                                translation_direction = config.get('translation_direction', 'zh_to_en')
+                                if translation_direction == 'zh_to_en':
+                                    code_trans_map = dict(zip(whodrug_code_df['code'], whodrug_code_df['name_en']))
+                                else:
+                                    code_trans_map = dict(zip(whodrug_code_df['code'], whodrug_code_df['name_cn']))
+                                
+                                # 将代码翻译映射到值翻译
+                                for mapping in config_value_mappings:
+                                    for value, code in mapping['value_code_map'].items():
+                                        if code in code_trans_map:
+                                            translation_dict[value] = code_trans_map[code]
+                        
+                        # 批量查询基于名称的翻译
+                        if all_unique_values:
+                            value_list = list(all_unique_values)
+                            placeholders = ','.join(['?'] * len(value_list))
+                            
+                            translation_direction = config.get('translation_direction', 'zh_to_en')
+                            if translation_direction == 'zh_to_en':
+                                query = f"SELECT name_cn, name_en FROM whodrug_merged WHERE name_cn IN ({placeholders}) AND version = ?"
+                                whodrug_name_df = pd.read_sql_query(query, conn, params=value_list + [whodrug_version])
+                                name_trans_map = dict(zip(whodrug_name_df['name_cn'], whodrug_name_df['name_en']))
+                            else:
+                                query = f"SELECT name_en, name_cn FROM whodrug_merged WHERE name_en IN ({placeholders}) AND version = ?"
+                                whodrug_name_df = pd.read_sql_query(query, conn, params=value_list + [whodrug_version])
+                                name_trans_map = dict(zip(whodrug_name_df['name_en'], whodrug_name_df['name_cn']))
+                            
+                            print(f'    📊 名称查询结果: {len(name_trans_map)} 条')
+                            
+                            # 合并名称翻译（优先使用代码翻译）
+                            for value, trans in name_trans_map.items():
+                                if value not in translation_dict:
+                                    translation_dict[value] = trans
+                    
+                    conn.close()
+                    
+                except Exception as e:
+                    print(f'    ❌ 批量数据库查询错误: {e}')
+                    translation_dict = {}
+                
+                print(f'    📝 获得翻译映射: {len(translation_dict)} 条')
+                
+                # 批量处理翻译结果
+                matched_items = []
+                unmatched_items_list = []
+                
+                # 使用列表推导式批量生成结果
+                for mapping in config_value_mappings:
+                    dataset_name = mapping['dataset_name']
+                    variable_name = mapping['variable_name']
+                    
+                    # 更新进度
+                    progress_info['current_dataset'] = f'{dataset_name}.{variable_name}'
+                    
+                    for value in mapping['unique_values']:
+                        # 检查是否需要翻译
+                        if not should_translate_value(value, config.get('translation_direction', 'zh_to_en')):
+                            continue
+                        
+                        if value in translation_dict:
+                            # 匹配项
+                            matched_items.append({
+                                'dataset': dataset_name,
+                                'variable': variable_name,
+                                'value': value,
+                                'translated_value': translation_dict[value],
+                                'translation_source': f'WHODrug {whodrug_version}',
+                                'translation_method': 'database',
+                                'dictionary_type': 'whodrug',
+                                'dictionary_version': whodrug_version,
+                                'needs_confirmation': False
+                            })
+                        else:
+                            # 未匹配项
+                            unmatched_items_list.append({
+                                'index': len(coded_items) + len(matched_items) + len(unmatched_items_list),
+                                'dataset': dataset_name,
+                                'variable': variable_name,
+                                'value': value,
+                                'dictionary_type': 'whodrug',
+                                'dictionary_version': whodrug_version
+                            })
+                
+                # 批量添加到结果列表
+                coded_items.extend(matched_items)
+                unmatched_items['whodrug'].extend(unmatched_items_list)
+                
+                # 批量添加未匹配项的占位符
+                placeholder_items = [
+                    {
+                        'dataset': item['dataset'],
+                        'variable': item['variable'],
+                        'value': item['value'],
+                        'translated_value': '',
+                        'translation_source': '未翻译',
+                        'translation_method': 'ai_pending',
+                        'dictionary_type': 'whodrug',
+                        'dictionary_version': whodrug_version,
+                        'needs_confirmation': True
+                    }
+                    for item in unmatched_items_list
+                ]
+                coded_items.extend(placeholder_items)
+                
+                # 批量保存未翻译的值到数据库
+                if placeholder_items:
+                    print(f'    💾 批量保存 {len(placeholder_items)} 个未翻译的WHODrug值')
+                    try:
+                        for item in placeholder_items:
+                            db_manager.save_translation_result(
+                                path=path,
+                                translation_direction=config.get('translation_direction', 'zh_to_en'),
+                                translation_type='编码清单',
+                                dataset_name=item['dataset'],
+                                variable_name=item['variable'],
+                                original_value=item['value'],
+                                translated_value='',
+                                translation_source='未翻译',
+                                needs_confirmation=True,
+                                confidence_score=0.0
+                            )
+                    except Exception as e:
+                        print(f'    ❌ 批量保存未翻译值失败: {e}')
+                
+                # 批量保存翻译结果
+                if matched_items:
+                    print(f'    💾 批量保存 {len(matched_items)} 个WHODrug翻译结果')
+                    try:
+                        # 使用批量操作保存翻译结果
+                        for item in matched_items:
+                            db_manager.save_translation_result(
+                                path=path,
+                                translation_direction=config.get('translation_direction', 'zh_to_en'),
+                                translation_type='编码清单',
+                                dataset_name=item['dataset'],
+                                variable_name=item['variable'],
+                                original_value=item['value'],
+                                translated_value=item['translated_value'],
+                                translation_source=item['translation_source'],
+                                needs_confirmation=False,
+                                confidence_score=1.0
+                            )
+                    except Exception as e:
+                        print(f'    ❌ 批量保存翻译结果失败: {e}')
+                
+                print(f'  ✅ WHODrug批量处理完成: 数据库匹配 {len(matched_items)} 项，AI翻译队列 {len(unmatched_items_list)} 项')
+                
+                # 更新已处理数据集计数
+                progress_info['processed_datasets'] += len(valid_whodrug_configs)
+        else:
+            print('  ⚠️ 没有WHODrug配置项需要处理')
+        
+        # 移除原有的单独循环处理逻辑，统一使用上面的批量处理
+        # for idx, meddra_item in enumerate(meddra_config):
+        # 上面的批量处理已经完成了所有MedDRA和WHODrug配置的处理
+        # 移除原有的单独循环处理逻辑
+        
+        # 原有的WHODrug循环处理逻辑已被上面的批量处理替代
+        # WHODrug批量处理已完成
+        # 所有循环处理逻辑已被批量处理替代
+
                         
         
-        # 统一批量AI翻译所有未匹配项目
-        print(f'\n开始统一AI翻译，MedDRA未匹配: {len(unmatched_items["meddra"])}项，WHODrug未匹配: {len(unmatched_items["whodrug"])}项')
+        # 使用pandas批量连接数据库，优化数据连接性能
+        print(f'\n开始批量数据库连接，MedDRA未匹配: {len(unmatched_items["meddra"])}项，WHODrug未匹配: {len(unmatched_items["whodrug"])}项')
         
-        # 优化处理限制：支持更大数据量，提高到200项限制
-        max_ai_items = 200
-        if len(unmatched_items['meddra']) > max_ai_items:
-            print(f'⚠️  MedDRA未匹配项目过多({len(unmatched_items["meddra"])}项)，只处理前{max_ai_items}项')
-            unmatched_items['meddra'] = unmatched_items['meddra'][:max_ai_items]
+        # 更新进度：开始数据库连接阶段
+        progress_info['current_stage'] = '批量数据库连接'
         
-        if len(unmatched_items['whodrug']) > max_ai_items:
-            print(f'⚠️  WHODrug未匹配项目过多({len(unmatched_items["whodrug"])}项)，只处理前{max_ai_items}项')
-            unmatched_items['whodrug'] = unmatched_items['whodrug'][:max_ai_items]
-        
-        # 处理MedDRA未匹配项目
+        # 处理MedDRA未匹配项目 - 使用pandas left join
         if unmatched_items['meddra']:
-            print(f'批量AI翻译MedDRA项目: {len(unmatched_items["meddra"])}项')
-            meddra_values = [item['value'] for item in unmatched_items['meddra']]
-            
-            # 构建AI翻译提示，包含编码类型和上下文信息
-            context_info = f"这些是MedDRA编码变量的值，请进行医学术语翻译。翻译方向：{'英译中' if translation_direction == 'en_to_zh' else '中译英'}"
+            print(f'批量连接MedDRA数据库: {len(unmatched_items["meddra"])}项')
+            progress_info['current_dataset'] = 'MedDRA 数据库连接'
             
             try:
-                # 使用优化的批量翻译API，提升效率和稳定性
-                import time
-                meddra_start_time = time.time()
-                print(f'🚀 开始MedDRA AI翻译，预计批次数: {(len(meddra_values) + 14) // 15}')
+                import pandas as pd
                 
-                # 设置翻译参数
-                source_lang = 'zh' if translation_direction == 'zh_to_en' else 'en'
-                target_lang = 'en' if translation_direction == 'zh_to_en' else 'zh'
+                # 构建待查询的DataFrame
+                meddra_df = pd.DataFrame([
+                    {
+                        'index': item['index'],
+                        'dataset': item['dataset'],
+                        'variable': item['variable'],
+                        'value': item['value'],
+                        'dictionary_type': item['dictionary_type'],
+                        'dictionary_version': item['dictionary_version']
+                    } for item in unmatched_items['meddra']
+                ])
                 
-                # 调用批量翻译API
-                batch_results = translation_service.batch_translate(
-                    meddra_values, 
-                    source_lang=source_lang, 
-                    target_lang=target_lang, 
-                    context='medical',
-                    batch_size=15
+                # 从数据库读取MedDRA翻译表
+                conn = sqlite3.connect('translation_db.sqlite')
+                if translation_direction == 'zh_to_en':
+                    db_query = f"SELECT name_cn as source_value, name_en as target_value FROM meddra_merged WHERE version = '{meddra_version}'"
+                else:
+                    db_query = f"SELECT name_en as source_value, name_cn as target_value FROM meddra_merged WHERE version = '{meddra_version}'"
+                
+                meddra_trans_df = pd.read_sql_query(db_query, conn)
+                conn.close()
+                
+                print(f'    从数据库读取到 {len(meddra_trans_df)} 条MedDRA翻译记录')
+                
+                # 使用pandas left join进行批量连接
+                merged_df = meddra_df.merge(
+                    meddra_trans_df, 
+                    left_on='value', 
+                    right_on='source_value', 
+                    how='left'
                 )
                 
-                # 处理翻译结果
-                success_count = 0
-                for i, (item, result) in enumerate(zip(unmatched_items['meddra'], batch_results)):
-                    if result.get('success') and result.get('translated_text'):
-                        translated_value = result['translated_text'].strip()
-                        coded_items[item['index']]['translated_value'] = translated_value
-                        success_count += 1
-                        if i % 10 == 0 or i == len(batch_results) - 1:  # 每10项或最后一项显示进度
-                            print(f'  📝 MedDRA翻译进度: {i+1}/{len(batch_results)} ({((i+1)/len(batch_results)*100):.1f}%)')
-                    else:
-                        print(f'  ❌ 翻译失败 {item["value"]}: {result.get("error", "未知错误")}')
+                # 更新coded_items
+                for _, row in merged_df.iterrows():
+                    idx = row['index']
+                    if idx < len(coded_items):
+                        if pd.notna(row['target_value']):
+                            # 数据库中找到翻译
+                            coded_items[idx]['translated_value'] = row['target_value']
+                            coded_items[idx]['translation_source'] = f'MedDRA {meddra_version}'
+                            coded_items[idx]['translation_method'] = 'database'
+                            coded_items[idx]['needs_confirmation'] = 0
+                            
+                            # 保存翻译结果到数据库
+                            db_manager.save_translation_result(
+                                path=path,
+                                translation_direction=translation_direction,
+                                translation_type='编码清单',
+                                dataset_name=row['dataset'],
+                                variable_name=row['variable'],
+                                original_value=row['value'],
+                                translated_value=row['target_value'],
+                                translation_source=f'MedDRA {meddra_version}',
+                                needs_confirmation=False,
+                                confidence_score=1.0
+                            )
+                        else:
+                            # 数据库中未找到翻译，输出空值
+                            coded_items[idx]['translated_value'] = ''
+                            coded_items[idx]['translation_source'] = '未翻译'
+                            coded_items[idx]['translation_method'] = 'database'
+                            coded_items[idx]['needs_confirmation'] = True
                 
-                meddra_end_time = time.time()
-                meddra_duration = meddra_end_time - meddra_start_time
-                print(f'✅ MedDRA AI翻译完成: {success_count}/{len(meddra_values)} 成功，耗时 {meddra_duration:.2f}秒')
+                matched_count = len(merged_df[pd.notna(merged_df['target_value'])])
+                print(f'MedDRA数据库连接完成，匹配到 {matched_count}/{len(unmatched_items["meddra"])} 项')
+                
             except Exception as e:
-                print(f'MedDRA批量AI翻译失败: {e}')
+                print(f'MedDRA批量数据库连接失败: {e}')
+                # 异常时输出空值
+                for item in unmatched_items['meddra']:
+                    if item['index'] < len(coded_items):
+                        coded_items[item['index']]['translated_value'] = ''
+                        coded_items[item['index']]['translation_source'] = '未翻译'
+                        coded_items[item['index']]['translation_method'] = 'database'
+                        coded_items[item['index']]['needs_confirmation'] = True
         
-        # 处理WHODrug未匹配项目
+        # 处理WHODrug未匹配项目 - 使用pandas left join
         if unmatched_items['whodrug']:
-            print(f'批量AI翻译WHODrug项目: {len(unmatched_items["whodrug"])}项')
-            whodrug_values = [item['value'] for item in unmatched_items['whodrug']]
-            
-            # 构建AI翻译提示，包含编码类型和上下文信息
-            context_info = f"这些是WHODrug药物编码变量的值，请进行药物术语翻译。翻译方向：{'英译中' if translation_direction == 'en_to_zh' else '中译英'}"
+            print(f'批量连接WHODrug数据库: {len(unmatched_items["whodrug"])}项')
+            progress_info['current_dataset'] = 'WHODrug 数据库连接'
             
             try:
-                # 使用优化的批量翻译API，提升效率和稳定性
-                whodrug_start_time = time.time()
-                print(f'🚀 开始WHODrug AI翻译，预计批次数: {(len(whodrug_values) + 14) // 15}')
+                import pandas as pd
                 
-                # 设置翻译参数
-                source_lang = 'zh' if translation_direction == 'zh_to_en' else 'en'
-                target_lang = 'en' if translation_direction == 'zh_to_en' else 'zh'
+                # 构建待查询的DataFrame
+                whodrug_df = pd.DataFrame([
+                    {
+                        'index': item['index'],
+                        'dataset': item['dataset'],
+                        'variable': item['variable'],
+                        'value': item['value'],
+                        'dictionary_type': item['dictionary_type'],
+                        'dictionary_version': item['dictionary_version']
+                    } for item in unmatched_items['whodrug']
+                ])
                 
-                # 调用批量翻译API
-                batch_results = translation_service.batch_translate(
-                    whodrug_values, 
-                    source_lang=source_lang, 
-                    target_lang=target_lang, 
-                    context='medical',
-                    batch_size=15
+                # 从数据库读取WHODrug翻译表
+                conn = sqlite3.connect('translation_db.sqlite')
+                if translation_direction == 'zh_to_en':
+                    db_query = f"SELECT name_cn as source_value, name_en as target_value FROM whodrug_merged WHERE version = '{whodrug_version}'"
+                else:
+                    db_query = f"SELECT name_en as source_value, name_cn as target_value FROM whodrug_merged WHERE version = '{whodrug_version}'"
+                
+                whodrug_trans_df = pd.read_sql_query(db_query, conn)
+                conn.close()
+                
+                print(f'    从数据库读取到 {len(whodrug_trans_df)} 条WHODrug翻译记录')
+                
+                # 使用pandas left join进行批量连接
+                merged_df = whodrug_df.merge(
+                    whodrug_trans_df, 
+                    left_on='value', 
+                    right_on='source_value', 
+                    how='left'
                 )
                 
-                # 处理翻译结果
-                success_count = 0
-                for i, (item, result) in enumerate(zip(unmatched_items['whodrug'], batch_results)):
-                    if result.get('success') and result.get('translated_text'):
-                        translated_value = result['translated_text'].strip()
-                        coded_items[item['index']]['translated_value'] = translated_value
-                        success_count += 1
-                        if i % 10 == 0 or i == len(batch_results) - 1:  # 每10项或最后一项显示进度
-                            print(f'  📝 WHODrug翻译进度: {i+1}/{len(batch_results)} ({((i+1)/len(batch_results)*100):.1f}%)')
-                    else:
-                        print(f'  ❌ 翻译失败 {item["value"]}: {result.get("error", "未知错误")}')
+                # 更新coded_items
+                for _, row in merged_df.iterrows():
+                    idx = row['index']
+                    if idx < len(coded_items):
+                        if pd.notna(row['target_value']):
+                            # 数据库中找到翻译
+                            coded_items[idx]['translated_value'] = row['target_value']
+                            coded_items[idx]['translation_source'] = f'WHODrug {whodrug_version}'
+                            coded_items[idx]['translation_method'] = 'database'
+                            coded_items[idx]['needs_confirmation'] = False
+                            
+                            # 保存翻译结果到数据库
+                            db_manager.save_translation_result(
+                                path=path,
+                                translation_direction=translation_direction,
+                                translation_type='编码清单',
+                                dataset_name=row['dataset'],
+                                variable_name=row['variable'],
+                                original_value=row['value'],
+                                translated_value=row['target_value'],
+                                translation_source=f'WHODrug {whodrug_version}',
+                                needs_confirmation=False,
+                                confidence_score=1.0
+                            )
+                        else:
+                            # 数据库中未找到翻译，输出空值
+                            coded_items[idx]['translated_value'] = ''
+                            coded_items[idx]['translation_source'] = '未翻译'
+                            coded_items[idx]['translation_method'] = 'database'
+                            coded_items[idx]['needs_confirmation'] = 1
                 
-                whodrug_end_time = time.time()
-                whodrug_duration = whodrug_end_time - whodrug_start_time
-                print(f'✅ WHODrug AI翻译完成: {success_count}/{len(whodrug_values)} 成功，耗时 {whodrug_duration:.2f}秒')
+                matched_count = len(merged_df[pd.notna(merged_df['target_value'])])
+                print(f'WHODrug数据库连接完成，匹配到 {matched_count}/{len(unmatched_items["whodrug"])} 项')
+                
             except Exception as e:
-                print(f'WHODrug批量AI翻译失败: {e}')
+                print(f'WHODrug批量数据库连接失败: {e}')
+                # 异常时输出空值
+                for item in unmatched_items['whodrug']:
+                    if item['index'] < len(coded_items):
+                        coded_items[item['index']]['translated_value'] = ''
+                        coded_items[item['index']]['translation_source'] = '未翻译'
+                        coded_items[item['index']]['translation_method'] = 'database'
+                        coded_items[item['index']]['needs_confirmation'] = True
         
         # 检测重复值并标记待确认
         # 创建一个字典来跟踪每个变量-值组合的翻译结果
@@ -3128,397 +3331,56 @@ def generate_coded_list():
         for item in coded_items:
             key = f"{item['variable']}|{item['value']}"
             if len(value_translations.get(key, set())) > 1:
-                item['needs_confirmation'] = 'Y'
+                item['needs_confirmation'] = True
                 item['highlight'] = True  # 添加高亮标记
             else:
                 item['highlight'] = False
         
-        # 对编码清单进行排序：按数据集、变量名、原始值、code列排序
-        coded_items.sort(key=lambda x: (
-            x.get('dataset', ''),
-            x.get('variable', ''),
-            x.get('value', ''),
-            x.get('code', '')
-        ))
+        # 按照用户要求排序：AI翻译在前，数据库翻译在后
+        ai_items = [item for item in coded_items if item['translation_source'] in ['AI', 'AI_FAILED']]
+        db_items = [item for item in coded_items if item['translation_source'] not in ['AI', 'AI_FAILED', '未翻译']]
+        other_items = [item for item in coded_items if item['translation_source'] == '未翻译']
         
-        # 不再限制返回的项目数量，返回所有项目
+        # 重新排列：AI翻译在前，数据库翻译在后
+        sorted_coded_items = ai_items + db_items + other_items
+        
+        # 限制返回的项目数量以提高响应速度
+        max_items = 500  # 限制最多返回500个项目
+        limited_coded_items = sorted_coded_items[:max_items] if len(sorted_coded_items) > max_items else sorted_coded_items
+        
+        # 最终进度更新
+        progress_info['current_stage'] = '完成处理'
+        progress_info['processed_items'] = len(sorted_coded_items)
+        progress_info['ai_completed'] = progress_info['ai_processing']
+        
+        # 统计翻译来源
+        db_matched = sum(1 for item in sorted_coded_items if item['translation_source'] not in ['AI', 'AI_FAILED', ''])
+        ai_translated = sum(1 for item in sorted_coded_items if item['translation_source'] in ['AI', 'AI_FAILED'] and item['translated_value'])
+        untranslated = sum(1 for item in sorted_coded_items if not item['translated_value'])
+        
+        # 更新进度统计
+        progress_info['db_matched'] = db_matched
+        progress_info['ai_completed'] = ai_translated
+        
         result = {
             'success': True,
-            'message': f'编码清单生成成功，共{len(coded_items)}项',
-            'data': coded_items,
-            'summary': {
+            'message': f'编码清单生成成功（显示前{len(limited_coded_items)}项，共{len(coded_items)}项）',
+            'data': {
                 'translation_direction': translation_direction,
                 'meddra_version': meddra_version,
                 'whodrug_version': whodrug_version,
-                'total_items': len(coded_items),
-                'displayed_count': len(coded_items),
-                'is_limited': False
-            }
-        }
-        
-        return jsonify(result)
-        
-    except Exception as e:
-        print(f"生成非编码清单时发生错误: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        return jsonify({'success': False, 'message': f'生成非编码清单失败: {str(e)}'}), 500
-
-@app.route('/api/generate_uncoded_list_preview', methods=['POST'])
-def generate_uncoded_list_preview():
-    """生成未编码清单预览（仅数据库匹配，不执行AI翻译）"""
-    try:
-        print("开始生成未编码清单预览...")
-        start_time = time.time()
-        
-        data = request.get_json()
-        
-        # 验证必要字段
-        if not data.get('translation_direction') or not data.get('path'):
-            return jsonify({'success': False, 'message': '缺少翻译方向或项目路径配置'}), 400
-        
-        translation_direction = data.get('translation_direction')
-        path = data.get('path')
-        page = data.get('page', 1)
-        page_size = data.get('page_size', 100)
-        
-        # 使用全局processor实例获取合并后的数据
-        # 确保processor已经加载了数据
-        if not processor.datasets:
-            success, message = processor.read_sas_files(path)
-            if not success:
-                return jsonify({'success': False, 'message': f'数据加载失败: {message}'})
-        
-        # 获取翻译库配置（如果存在）
-        db_manager = DatabaseManager()
-        translation_config = db_manager.get_translation_library_config(path)
-        
-        # 获取MedDRA和WHODrug配置表中的变量名（如果有配置的话）
-        meddra_config = translation_config.get('meddra_config', []) if translation_config else []
-        whodrug_config = translation_config.get('whodrug_config', []) if translation_config else []
-        
-        # 收集编码变量名
-        coded_variables = set()
-        for item in meddra_config:
-            if item.get('name_column'):
-                coded_variables.add(item['name_column'])
-        for item in whodrug_config:
-            if item.get('name_column'):
-                coded_variables.add(item['name_column'])
-        
-        # 生成未编码清单
-        uncoded_items = []
-        processed_items = set()  # 用于去重
-        
-        # 遍历所有数据集和变量，找出不在编码配置中的变量
-        for dataset_name, dataset_info in processor.datasets.items():
-            df = dataset_info['data']
-            
-            for column in df.columns:
-                if column not in coded_variables:
-                    # 获取该变量的唯一值
-                    unique_values = df[column].dropna().unique()
-                    
-                    for value in unique_values:
-                        if pd.isna(value) or str(value).strip() == '':
-                            continue
-                        
-                        value_str = str(value).strip()
-                        
-                        # 检查是否为纯数字或日期格式，这些通常不需要翻译
-                        if _is_numeric_or_date_value(value_str):
-                            continue
-                        
-                        item_key = (dataset_name, column, value_str)
-                        
-                        if item_key in processed_items:
-                            continue
-                        processed_items.add(item_key)
-                        
-                        # 预览版本不执行AI翻译，只添加基本信息
-                        uncoded_items.append({
-                            'dataset': dataset_name,
-                            'variable': column,
-                            'value': value_str,
-                            'translated_value': '',  # 预览版本不包含翻译
-                            'translation_source': 'none',
-                            'needs_confirmation': 'Y',
-                            'highlight': False
-                        })
-        
-        # 对未编码清单进行排序：按数据集、变量名、原始值排序
-        uncoded_items.sort(key=lambda x: (x['dataset'], x['variable'], x['value']))
-        
-        # 计算分页
-        total_items = len(uncoded_items)
-        total_pages = (total_items + page_size - 1) // page_size
-        start_idx = (page - 1) * page_size
-        end_idx = start_idx + page_size
-        paginated_items = uncoded_items[start_idx:end_idx]
-        
-        # 计算处理时间
-        processing_time = time.time() - start_time
-        print(f"未编码清单预览处理完成，共{total_items}项，返回第{page}页（{len(paginated_items)}项），耗时 {processing_time:.2f} 秒")
-        
-        result = {
-            'success': True,
-            'data': paginated_items,
-            'pagination': {
-                'current_page': page,
-                'page_size': page_size,
-                'total_count': total_items,
-                'total_pages': total_pages,
-                'has_prev': page > 1,
-                'has_next': page < total_pages
-            },
-            'summary': {
-                'total_items': total_items,
-                'database_matched_items': 0,  # 预览版本不包含数据库匹配
-                'ai_translated_items': 0,  # 预览版本不包含AI翻译
-            }
-        }
-        
-        return jsonify(result)
-        
-    except Exception as e:
-        print(f'生成未编码清单预览时出错: {str(e)}')
-        import traceback
-        traceback.print_exc()
-        return jsonify({'success': False, 'message': f'生成未编码清单预览失败: {str(e)}'}), 500
-
-@app.route('/api/generate_uncoded_list', methods=['POST'])
-def generate_uncoded_list():
-    """生成非编码清单"""
-    try:
-        print("开始生成非编码清单...")
-        start_time = time.time()
-        
-        data = request.get_json()
-        
-        # 验证必要字段
-        if not data.get('translation_direction') or not data.get('path'):
-            return jsonify({'success': False, 'message': '缺少翻译方向或项目路径配置'}), 400
-        
-        translation_direction = data.get('translation_direction')
-        path = data.get('path')
-        
-        # 分页参数
-        page = data.get('page', 1)  # 页码，默认第1页
-        page_size = data.get('page_size', 100)  # 每页大小，默认100条
-        
-        # 验证分页参数
-        if page < 1:
-            page = 1
-        if page_size < 1 or page_size > 1000:  # 限制每页最大1000条
-            page_size = 100
-        
-        # 使用全局processor实例获取合并后的数据
-        # 确保processor已经加载了数据
-        if not processor.datasets:
-            success, message = processor.read_sas_files(path)
-            if not success:
-                return jsonify({'success': False, 'message': f'数据加载失败: {message}'})
-        
-        # 获取翻译库配置（如果存在）
-        db_manager = DatabaseManager()
-        translation_config = db_manager.get_translation_library_config(path)
-        
-        # 获取MedDRA和WHODrug配置表中的变量名（如果有配置的话）
-        meddra_config = translation_config.get('meddra_config', []) if translation_config else []
-        whodrug_config = translation_config.get('whodrug_config', []) if translation_config else []
-        
-        # 收集编码变量名
-        coded_variables = set()
-        for item in meddra_config:
-            if item.get('name_column'):
-                coded_variables.add(item['name_column'])
-        for item in whodrug_config:
-            if item.get('name_column'):
-                coded_variables.add(item['name_column'])
-        
-        # 生成非编码清单
-        uncoded_items = []
-        
-        # 遍历所有数据集和变量，找出不在编码配置中的变量
-        for dataset_name, dataset_info in processor.datasets.items():
-            df = dataset_info['data']
-            
-            for column in df.columns:
-                if column not in coded_variables:
-                    # 获取该变量的唯一值
-                    unique_values = df[column].dropna().unique()
-                    
-                    for value in unique_values:
-                        translated_value = ''
-                        translation_source = 'metadata'  # 使用metadata进行翻译
-                        needs_confirmation = 'Y'  # 非编码项需要确认
-                        
-        # 批量从metadata表匹配翻译
-        all_values = []
-        for dataset_name, dataset_info in processor.datasets.items():
-            df = dataset_info['data']
-            for column in df.columns:
-                if column not in coded_variables:
-                    unique_values = df[column].dropna().unique()
-                    all_values.extend([str(v) for v in unique_values])
-        
-        # 去重所有值
-        unique_all_values = list(set(all_values))
-        print(f"开始批量查询metadata，共{len(unique_all_values)}个唯一值")
-        
-        # 批量查询metadata表
-        metadata_translations = {}
-        if unique_all_values:
-            conn = sqlite3.connect('translation_db.sqlite', timeout=30)  # 设置30秒超时
-            cursor = conn.cursor()
-            
-            try:
-                # 分批查询，每批1000个值
-                batch_size = 1000
-                for i in range(0, len(unique_all_values), batch_size):
-                    batch_values = unique_all_values[i:i+batch_size]
-                    placeholders = ','.join(['?'] * len(batch_values))
-                    
-                    if translation_direction == 'zh_to_en':
-                        # 中译英：用原始值匹配__TEST_CN，获取__TEST_EN
-                        query = f"""
-                            SELECT __TEST_CN, __TEST_EN FROM metadata 
-                            WHERE __TEST_CN IN ({placeholders}) AND __TEST_EN IS NOT NULL AND __TEST_EN != ''
-                        """
-                        cursor.execute(query, batch_values)
-                        for row in cursor.fetchall():
-                            cn_value, en_value = row
-                            if cn_value not in metadata_translations:
-                                metadata_translations[cn_value] = []
-                            metadata_translations[cn_value].append(en_value)
-                    else:
-                        # 英译中：用原始值匹配__TEST_EN，获取__TEST_CN
-                        query = f"""
-                            SELECT __TEST_EN, __TEST_CN FROM metadata 
-                            WHERE __TEST_EN IN ({placeholders}) AND __TEST_CN IS NOT NULL AND __TEST_CN != ''
-                        """
-                        cursor.execute(query, batch_values)
-                        for row in cursor.fetchall():
-                            en_value, cn_value = row
-                            if en_value not in metadata_translations:
-                                metadata_translations[en_value] = []
-                            metadata_translations[en_value].append(cn_value)
-                    
-                    print(f"已处理批次 {i//batch_size + 1}/{(len(unique_all_values) + batch_size - 1)//batch_size}")
-            
-            except Exception as metadata_error:
-                print(f"Metadata批量查询错误: {metadata_error}")
-            finally:
-                conn.close()
-        
-        print(f"Metadata查询完成，找到{len(metadata_translations)}个匹配项")
-        
-        # 生成非编码清单
-        uncoded_items = []
-        ai_translation_needed = []  # 收集需要AI翻译的项目
-        
-        # 遍历所有数据集和变量，找出不在编码配置中的变量
-        for dataset_name, dataset_info in processor.datasets.items():
-            df = dataset_info['data']
-            
-            for column in df.columns:
-                if column not in coded_variables:
-                    # 获取该变量的唯一值
-                    unique_values = df[column].dropna().unique()
-                    
-                    for value in unique_values:
-                        str_value = str(value)
-                        translated_value = ''
-                        translation_source = 'metadata'  # 使用metadata进行翻译
-                        needs_confirmation = 'Y'  # 非编码项需要确认
-                        
-                        # 从预先查询的metadata结果中获取翻译
-                        if str_value in metadata_translations:
-                            translations = metadata_translations[str_value]
-                            if len(translations) == 1:
-                                translated_value = translations[0]
-                                needs_confirmation = 'N'  # metadata匹配不需要确认
-                            elif len(translations) > 1:
-                                # 多个翻译结果，需要高亮确认
-                                translated_value = ' | '.join(translations)
-                                needs_confirmation = 'Y'  # 多个结果需要确认
-                                translation_source = 'metadata_multiple'
-                        
-                        # 如果metadata无法匹配，暂时不进行AI翻译，先收集起来
-                        if not translated_value:
-                            # 暂时设置为空，避免同步AI翻译导致超时
-                            translated_value = ''
-                            translation_source = 'pending_ai'  # 标记为待AI翻译
-                            needs_confirmation = 'Y'
-                            
-                            # 收集需要AI翻译的项目（去重）
-                            if str_value not in [item['value'] for item in ai_translation_needed]:
-                                ai_translation_needed.append({
-                                    'value': str_value,
-                                    'direction': translation_direction
-                                })
-                        
-                        uncoded_items.append({
-                            'dataset': dataset_name,
-                            'variable': column,
-                            'value': str_value,
-                            'translated_value': translated_value,
-                            'translation_source': translation_source,
-                            'needs_confirmation': needs_confirmation
-                        })
-        
-        print(f"非编码清单生成完成，共{len(uncoded_items)}项，其中{len(ai_translation_needed)}项需要AI翻译")
-        
-        # 检测重复值并标记需要确认的项目
-        value_translations = {}
-        for item in uncoded_items:
-            key = f"{item['variable']}|{item['value']}"
-            if key not in value_translations:
-                value_translations[key] = set()
-            if item['translated_value']:
-                value_translations[key].add(item['translated_value'])
-        
-        # 标记有多个翻译结果的项目
-        for item in uncoded_items:
-            key = f"{item['variable']}|{item['value']}"
-            if len(value_translations.get(key, set())) > 1:
-                item['needs_confirmation'] = 'Y'
-                item['highlight'] = True  # 添加高亮标记
-            else:
-                item['highlight'] = False
-        
-        # 对非编码清单进行排序：按数据集、变量名、原始值排序
-        uncoded_items.sort(key=lambda x: (x['dataset'], x['variable'], x['value']))
-        
-        # 计算处理时间
-        processing_time = time.time() - start_time
-        print(f"非编码清单处理完成，耗时 {processing_time:.2f} 秒")
-        
-        # 计算分页
-        total_count = len(uncoded_items)
-        start_index = (page - 1) * page_size
-        end_index = start_index + page_size
-        paginated_items = uncoded_items[start_index:end_index]
-        
-        # 计算总页数
-        total_pages = (total_count + page_size - 1) // page_size
-        
-        result = {
-            'success': True,
-            'message': '非编码清单生成成功',
-            'processing_time': f"{processing_time:.2f}秒",  # 添加处理时间信息
-            'data': {
-                'translation_direction': translation_direction,
-                'uncoded_items': paginated_items,
-                'ai_translation_needed': len(ai_translation_needed),  # 添加需要AI翻译的数量
-                'pagination': {
-                    'current_page': page,
-                    'page_size': page_size,
-                    'total_count': total_count,
-                    'total_pages': total_pages,
-                    'has_next': page < total_pages,
-                    'has_prev': page > 1
-                }
+                'coded_items': limited_coded_items,
+                'total_count': len(sorted_coded_items),
+                'displayed_count': len(limited_coded_items),
+                'is_limited': len(sorted_coded_items) > max_items,
+                'translation_stats': {
+                    'db_matched': db_matched,
+                    'ai_translated': ai_translated,
+                    'untranslated': untranslated,
+                    'total_meddra_unmatched': len(unmatched_items['meddra']),
+                    'total_whodrug_unmatched': len(unmatched_items['whodrug'])
+                },
+                'progress_info': progress_info
             }
         }
         
@@ -3527,13 +3389,9 @@ def generate_uncoded_list():
     except Exception as e:
         return jsonify({'success': False, 'message': str(e)}), 500
 
-
-
-
-
-@app.route('/api/generate_dataset_label_preview', methods=['POST'])
-def generate_dataset_label_preview():
-    """生成数据集Label预览（不执行AI翻译）"""
+@app.route('/api/generate_uncoded_list', methods=['POST'])
+def generate_uncoded_list():
+    """生成非编码清单"""
     try:
         data = request.get_json()
         
@@ -3543,8 +3401,6 @@ def generate_dataset_label_preview():
         
         translation_direction = data.get('translation_direction')
         path = data.get('path')
-        page = data.get('page', 1)
-        page_size = data.get('page_size', 100)
         
         # 获取翻译库配置
         db_manager = DatabaseManager()
@@ -3553,145 +3409,230 @@ def generate_dataset_label_preview():
         if not translation_config:
             return jsonify({'success': False, 'message': '未找到翻译库配置，请先保存配置'}), 400
         
-        ig_version = translation_config.get('ig_version')
-        if not ig_version:
-            return jsonify({'success': False, 'message': '未找到IG版本配置'}), 400
-        
         # 使用全局processor实例获取合并后的数据
         # 确保processor已经加载了数据
-        if not processor.datasets:
-            success, message = processor.read_sas_files(path)
+        if not processor.datasets or getattr(processor, 'current_path', None) != path:
+            success, message = processor.read_sas_files(path, mode='SDTM')
             if not success:
-                return jsonify({'success': False, 'message': f'数据加载失败: {message}'})
+                return jsonify({'success': False, 'message': f'读取SAS文件失败: {message}'}), 500
+            processor.current_path = path
         
-        # 生成数据集标签清单（预览模式，不执行AI翻译）
-        dataset_labels = []
+        # 获取MedDRA和WHODrug配置表中的变量名
+        meddra_config = translation_config.get('meddra_config', [])
+        whodrug_config = translation_config.get('whodrug_config', [])
         
-        # 遍历所有数据集，生成标签信息
+        # 使用向量化操作收集编码变量名
+        import pandas as pd
+        coded_variables = set()
+        
+        # 从MedDRA配置中提取变量名
+        if meddra_config:
+            meddra_df = pd.DataFrame(meddra_config)
+            coded_variables.update(meddra_df['name_column'].dropna().unique())
+        
+        # 从WHODrug配置中提取变量名
+        if whodrug_config:
+            whodrug_df = pd.DataFrame(whodrug_config)
+            coded_variables.update(whodrug_df['name_column'].dropna().unique())
+        
+        print(f'编码变量列表: {coded_variables}')
+        
+        # 使用pandas批量处理所有数据集，收集非编码变量的唯一值
+        all_uncoded_data = []
+        
         for dataset_name, dataset_info in processor.datasets.items():
-            # 获取数据集的基本信息
-            original_label = dataset_info.get('label', '')
+            df = dataset_info.get('data_view', dataset_info['data'])
+            meta = dataset_info.get('meta')
             
-            # 优先使用原始的数据集标签，避免被数据集名称覆盖
-            if original_label and original_label != dataset_name:
-                # 使用原始标签
-                pass
-            else:
-                # 如果标签为空或等于数据集名称，尝试从meta中获取更多信息
-                meta = dataset_info.get('meta')
-                if meta:
-                    # 尝试从meta的各种属性获取标签
-                    for attr in ['table_name', 'file_label', 'dataset_label', 'label', 'description', 'title']:
-                        if hasattr(meta, attr):
-                            attr_value = getattr(meta, attr)
-                            if attr_value and attr_value != dataset_name:
-                                original_label = attr_value
-                                break
-                    
-                    # 如果meta中没有找到合适的标签，尝试从文件路径推断
-                    if not original_label or original_label == dataset_name:
-                        file_path = dataset_info.get('path', '')
-                        if file_path:
-                            # 使用文件名作为标签（去掉扩展名）
-                            import os
-                            file_label = os.path.splitext(os.path.basename(file_path))[0]
-                            if file_label != dataset_name:
-                                original_label = file_label
+            # 筛选出非编码变量
+            uncoded_columns = [col for col in df.columns if col not in coded_variables]
+            
+            if not uncoded_columns:
+                continue
+            
+            # 获取变量标签信息
+            variable_labels = {}
+            if meta and hasattr(meta, 'column_labels') and meta.column_labels:
+                for i, column in enumerate(df.columns):
+                    if i < len(meta.column_labels) and meta.column_labels[i]:
+                        variable_labels[column] = meta.column_labels[i]
+            
+            # 使用pandas向量化操作处理每个非编码变量
+            for column in uncoded_columns:
+                # 获取该变量的非空唯一值
+                unique_values = df[column].dropna().unique()
                 
-                # 最后的回退：如果还是没有合适的标签，才使用数据集名称
-                if not original_label:
-                    original_label = dataset_name
-            
-            print(f"数据集 {dataset_name} 的标签: '{original_label}'")  # 调试信息
-            
-            translated_label = ''
-            translation_source = f'sdtm2dataset_{ig_version}'
-            needs_confirmation = 'Y'
-            
-            # 实现从sdtm2dataset表的匹配逻辑
-            if original_label:
-                try:
-                    conn = sqlite3.connect('translation_db.sqlite')
-                    cursor = conn.cursor()
-                    
-                    # 根据翻译方向选择合适的表
-                    if translation_direction == 'en_to_zh':
-                        # 英译中：从英文表查询，获取中文翻译
-                        table_name = f'sdtm2dataset{ig_version}en'
-                        cursor.execute(f"SELECT Dataset, Description FROM {table_name} WHERE Dataset = ? OR Description = ?", 
-                                     (dataset_name, original_label))
-                        result = cursor.fetchone()
-                        if result:
-                            # 找到匹配，查询对应的中文翻译
-                            cn_table = f'sdtm2dataset{ig_version}cn'
-                            cursor.execute(f"SELECT Description FROM {cn_table} WHERE Dataset = ?", (result[0],))
-                            cn_result = cursor.fetchone()
-                            if cn_result:
-                                translated_label = cn_result[0]
-                                needs_confirmation = 'N'  # 数据库匹配不需要确认
-                    else:
-                        # 中译英：从中文表查询，获取英文翻译
-                        table_name = f'sdtm2dataset{ig_version}cn'
-                        cursor.execute(f"SELECT Dataset, Description FROM {table_name} WHERE Dataset = ? OR Description = ?", 
-                                     (dataset_name, original_label))
-                        result = cursor.fetchone()
-                        if result:
-                            # 找到匹配，查询对应的英文翻译
-                            en_table = f'sdtm2dataset{ig_version}en'
-                            cursor.execute(f"SELECT Description FROM {en_table} WHERE Dataset = ?", (result[0],))
-                            en_result = cursor.fetchone()
-                            if en_result:
-                                translated_label = en_result[0]
-                                needs_confirmation = 'N'  # 数据库匹配不需要确认
-                    
-                    conn.close()
-                except Exception as db_error:
-                    print(f"数据库查询错误: {db_error}")
-                    # 数据库查询失败时保持默认值
-            
-            dataset_labels.append({
-                'dataset': dataset_name,
-                'original_label': original_label,
-                'translated_label': translated_label,
-                'translation_source': translation_source,
-                'needs_confirmation': needs_confirmation
+                if len(unique_values) == 0:
+                    continue
+                
+                # 限制每个变量的唯一值数量，避免数据过多
+                if len(unique_values) > 100:
+                    unique_values = unique_values[:100]
+                
+                # 获取变量标签
+                variable_label = variable_labels.get(column, '')
+                
+                # 批量创建记录
+                for value in unique_values:
+                    all_uncoded_data.append({
+                        'dataset': dataset_name,
+                        'variable': column,
+                        'variable_label': variable_label,
+                        'value': str(value)
+                    })
+        
+        print(f'收集到 {len(all_uncoded_data)} 个非编码数据项')
+        
+        # 创建DataFrame进行去重处理
+        if not all_uncoded_data:
+            return jsonify({
+                'success': True,
+                'message': '未找到非编码数据项',
+                'data': {
+                    'translation_direction': translation_direction,
+                    'uncoded_items': [],
+                    'total_count': 0
+                }
             })
         
-        # 按数据集名称排序
-        dataset_labels.sort(key=lambda x: x['dataset'])
+        uncoded_df = pd.DataFrame(all_uncoded_data)
         
-        # 计算分页
-        total_items = len(dataset_labels)
-        total_pages = (total_items + page_size - 1) // page_size
-        start_idx = (page - 1) * page_size
-        end_idx = start_idx + page_size
-        paginated_items = dataset_labels[start_idx:end_idx]
+        # 在去重前过滤掉只包含数值、日期、单位的数据
+        def is_numeric_date_or_unit_only(row):
+            """结合变量标签判断值是否只包含数值、日期或单位"""
+            import re
+            value_str = str(row['value']).strip()
+            variable_label = str(row.get('variable_label', '')).lower()
+            variable_name = str(row.get('variable', '')).lower()
+            
+            # 空值或过短的值直接过滤
+            if not value_str or len(value_str) <= 2:
+                return True
+            
+            # 基于变量标签和变量名判断日期时间变量
+            date_keywords = ['date', 'time', 'datetime', 'day', 'month', 'year', 
+                           '日期', '时间', '年', '月', '日', 'dt', 'tm', 'visit']
+            if any(keyword in variable_label or keyword in variable_name for keyword in date_keywords):
+                # 对于日期时间变量，更严格地判断
+                date_patterns = [
+                    r'^\d{4}[-/]\d{1,2}[-/]\d{1,2}$',  # YYYY-MM-DD
+                    r'^\d{1,2}[-/]\d{1,2}[-/]\d{4}$',  # MM-DD-YYYY
+                    r'^\d{4}\d{2}\d{2}$',              # YYYYMMDD
+                    r'^\d{2}\w{3}\d{4}$',              # DDMMMYYYY
+                    r'^\d{1,2}:\d{2}(:\d{2})?$',      # HH:MM:SS
+                ]
+                for pattern in date_patterns:
+                    if re.match(pattern, value_str, re.IGNORECASE):
+                        return True
+            
+            # 基于变量标签和变量名判断单位变量
+            unit_keywords = ['unit', 'weight', 'height', 'dose', 'volume', 'temp', 
+                           '单位', '重量', '身高', '剂量', '体积', '温度', 'kg', 'cm', 'mg']
+            if any(keyword in variable_label or keyword in variable_name for keyword in unit_keywords):
+                # 对于单位变量，检查是否为纯单位值
+                units = ['kg', 'g', 'mg', 'μg', 'ng', 'pg', 'l', 'ml', 'μl', 'dl',
+                        'cm', 'mm', 'm', 'km', 'in', 'ft', 'h', 'min', 's', 'hr',
+                        'bpm', 'mmhg', '°c', '°f', '%', 'percent']
+                if value_str.lower() in units:
+                    return True
+                # 数字+单位组合
+                if re.match(r'^[+-]?\d*\.?\d+\s*[a-zA-Z%°μ]+$', value_str):
+                    return True
+            
+            # 纯数字（包括小数、负数、科学计数法）
+            if re.match(r'^[+-]?\d*\.?\d+([eE][+-]?\d+)?$', value_str):
+                return True
+            
+            # 简单分类值
+            simple_values = ['yes', 'no', 'y', 'n', 'male', 'female', 'm', 'f',
+                           'left', 'right', 'bilateral', 'na', 'null', 'missing']
+            if value_str.lower() in simple_values:
+                return True
+            
+            # 单个字符或数字
+            if len(value_str) == 1 and (value_str.isdigit() or value_str.isalpha()):
+                return True
+            
+            return False
+        
+        # 应用过滤函数
+        initial_count = len(uncoded_df)
+        uncoded_df = uncoded_df[~uncoded_df.apply(is_numeric_date_or_unit_only, axis=1)]
+        filtered_count = len(uncoded_df)
+        print(f'过滤数值/日期/单位数据：从 {initial_count} 项减少到 {filtered_count} 项')
+        
+        # 按数据集、变量名、变量值去重
+        uncoded_df = uncoded_df.drop_duplicates(subset=['dataset', 'variable', 'value'])
+        print(f'去重后剩余 {len(uncoded_df)} 个唯一数据项')
+        
+        # 添加翻译相关字段，设置翻译来源为"未翻译"
+        uncoded_df['translated_value'] = ''
+        uncoded_df['translation_source'] = '未翻译'
+        uncoded_df['translation_method'] = 'uncoded'
+        uncoded_df['needs_confirmation'] = 1
+        uncoded_df['confidence_score'] = 0.0
+        
+        # 批量保存到translation_results数据库
+        print('开始批量保存翻译结果到数据库')
+        
+        # 批量保存结果
+        saved_count = 0
+        for _, row in uncoded_df.iterrows():
+            try:
+                result = db_manager.save_translation_result(
+                    path=path,
+                    translation_direction=translation_direction,
+                    translation_type='非编码清单',
+                    dataset_name=row['dataset'],
+                    variable_name=row['variable'],
+                    original_value=row['value'],
+                    translated_value=row['translated_value'],
+                    translation_source=row['translation_source'],
+                    needs_confirmation=True,
+                    confidence_score=row['confidence_score']
+                )
+                if result:
+                    saved_count += 1
+            except Exception as e:
+                print(f'保存单条记录时发生错误: {str(e)}')
+                continue
+        
+        print(f'成功批量保存 {saved_count} 条翻译结果到数据库')
+        
+        # 转换为返回格式
+        uncoded_items = uncoded_df[[
+            'dataset', 'variable', 'value', 'translated_value', 
+            'translation_source', 'needs_confirmation'
+        ]].to_dict('records')
+        
+        # 按数据集名称和变量名排序
+        uncoded_items.sort(key=lambda x: (x['dataset'], x['variable'], x['value']))
+        
+        # 限制返回数量以提高响应速度
+        max_items = 500
+        if len(uncoded_items) > max_items:
+            uncoded_items = uncoded_items[:max_items]
         
         result = {
             'success': True,
-            'message': '数据集Label预览生成成功',
-            'dataset_labels': paginated_items,
-            'pagination': {
-                'current_page': page,
-                'page_size': page_size,
-                'total_count': total_items,
-                'total_pages': total_pages,
-                'has_prev': page > 1,
-                'has_next': page < total_pages
-            },
-            'summary': {
-                'total_items': total_items,
-                'database_matched_items': sum(1 for item in dataset_labels if item['translated_label']),
-                'ai_translation_needed': sum(1 for item in dataset_labels if not item['translated_label'] and item['original_label'])
+            'message': '非编码清单生成成功',
+            'data': {
+                'translation_direction': translation_direction,
+                'uncoded_items': uncoded_items,
+                'total_count': len(uncoded_df),
+                'returned_count': len(uncoded_items)
             }
         }
         
-        print(f"数据集标签预览生成完成，共{total_items}项，返回第{page}页（{len(paginated_items)}项）")
         return jsonify(result)
         
     except Exception as e:
-        print(f"生成数据集标签预览时出错: {str(e)}")
+        print(f'生成非编码清单时发生错误: {e}')
         return jsonify({'success': False, 'message': str(e)}), 500
+
+
+
+
 
 @app.route('/api/generate_dataset_label', methods=['POST'])
 def generate_dataset_label():
@@ -3705,8 +3646,6 @@ def generate_dataset_label():
         
         translation_direction = data.get('translation_direction')
         path = data.get('path')
-        page = data.get('page', 1)
-        page_size = data.get('page_size', 100)
         
         # 获取翻译库配置
         db_manager = DatabaseManager()
@@ -3722,79 +3661,102 @@ def generate_dataset_label():
         # 使用全局processor实例获取合并后的数据
         # 确保processor已经加载了数据
         if not processor.datasets:
-            success, message = processor.read_sas_files(path)
-            if not success:
-                return jsonify({'success': False, 'message': f'数据加载失败: {message}'})
+            processor.read_sas_files(path)
         
-        # 生成数据集标签清单
-        dataset_labels = []
+        # 使用pandas批量处理数据集标签
+        import pandas as pd
+        import sqlite3
         
-        # 遍历所有数据集，生成标签信息
-        for dataset_name, dataset_info in processor.datasets.items():
-            # 获取数据集的基本信息
-            original_label = dataset_info.get('label', '')
+        # 1. 使用向量化操作收集所有数据集信息
+        dataset_names = list(processor.datasets.keys())
+        dataset_info_list = []
+        
+        # 批量处理数据集标签提取
+        def extract_label(dataset_name):
+            dataset_info = processor.datasets[dataset_name]
+            meta = dataset_info.get('meta')
+            
+            if meta and hasattr(meta, 'table_label') and meta.table_label:
+                return meta.table_label
+            elif meta and hasattr(meta, 'file_label') and meta.file_label:
+                return meta.file_label
+            else:
+                return dataset_name
+        
+        # 使用列表推导式批量处理
+        dataset_info_list = [
+            {'dataset': name, 'original_label': extract_label(name)}
+            for name in dataset_names
+        ]
+        
+        # 2. 创建DataFrame
+        df_datasets = pd.DataFrame(dataset_info_list)
+        
+        # 3. 批量查询SDTM数据库（参考generate_variable_label的方式）
+        dataset_translations = db_manager.get_batch_dataset_translations(dataset_names, ig_version)
+        
+        # 4. 创建翻译结果DataFrame
+        translation_data = []
+        for dataset_name in dataset_names:
+            translation = dataset_translations.get(dataset_name)
             translated_label = ''
-            translation_source = f'sdtm2dataset_{ig_version}'
-            needs_confirmation = 'Y'
+            translation_source = '未翻译'
+            needs_confirmation = True
             
-            # 实现从sdtm2dataset表的匹配逻辑
-            if original_label:
-                try:
-                    conn = sqlite3.connect('translation_db.sqlite')
-                    cursor = conn.cursor()
-                    
-                    # 根据翻译方向选择合适的表
-                    if translation_direction == 'en_to_zh':
-                        # 英译中：从英文表查询，获取中文翻译
-                        table_name = f'sdtm2dataset{ig_version}en'
-                        cursor.execute(f"SELECT Dataset, Description FROM {table_name} WHERE Dataset = ? OR Description = ?", 
-                                     (dataset_name, original_label))
-                        result = cursor.fetchone()
-                        if result:
-                            # 找到匹配，查询对应的中文翻译
-                            cn_table = f'sdtm2dataset{ig_version}cn'
-                            cursor.execute(f"SELECT Description FROM {cn_table} WHERE Dataset = ?", (result[0],))
-                            cn_result = cursor.fetchone()
-                            if cn_result:
-                                translated_label = cn_result[0]
-                                needs_confirmation = 'N'  # 数据库匹配不需要确认
-                    else:
-                        # 中译英：从中文表查询，获取英文翻译
-                        table_name = f'sdtm2dataset{ig_version}cn'
-                        cursor.execute(f"SELECT Dataset, Description FROM {table_name} WHERE Dataset = ? OR Description = ?", 
-                                     (dataset_name, original_label))
-                        result = cursor.fetchone()
-                        if result:
-                            # 找到匹配，查询对应的英文翻译
-                            en_table = f'sdtm2dataset{ig_version}en'
-                            cursor.execute(f"SELECT Description FROM {en_table} WHERE Dataset = ?", (result[0],))
-                            en_result = cursor.fetchone()
-                            if en_result:
-                                translated_label = en_result[0]
-                                needs_confirmation = 'N'  # 数据库匹配不需要确认
-                    
-                    conn.close()
-                except Exception as db_error:
-                    print(f"数据库查询错误: {db_error}")
-                    # 数据库查询失败时保持默认值
+            if translation:
+                if translation_direction == 'en_to_zh':
+                    translated_label = translation.get('name_cn', '')
+                else:
+                    translated_label = translation.get('name_en', '')
+                
+                if translated_label:
+                    translation_source = ig_version
+                    needs_confirmation = False
             
-            # 如果sdtm2dataset无法匹配，使用AI翻译
-            if not translated_label and original_label and translation_direction == 'en_to_zh':
-                ai_result = translation_service.translate_text(
-                    original_label, 'en', 'zh', 'medical'
-                )
-                if ai_result.get('success'):
-                    translated_label = ai_result.get('translated_text', '')
-                    translation_source = 'AI'
-                    needs_confirmation = 'Y'  # AI翻译需要确认
-            
-            dataset_labels.append({
+            translation_data.append({
                 'dataset': dataset_name,
-                'original_label': original_label,
                 'translated_label': translated_label,
                 'translation_source': translation_source,
                 'needs_confirmation': needs_confirmation
             })
+        
+        df_translations = pd.DataFrame(translation_data)
+        
+        # 5. 使用pandas left join批量连接数据
+        df_result = df_datasets.merge(
+            df_translations, 
+            on='dataset', 
+            how='left'
+        )
+        
+        # 转换needs_confirmation为字符串格式
+        df_result['needs_confirmation'] = df_result['needs_confirmation'].apply(
+            lambda x: 'Y' if x else 'N'
+        )
+        df_result['version'] = ig_version
+        
+        # 7. 批量保存翻译结果到数据库（仅保存有翻译的项目）
+        translated_items = df_result[df_result['translated_label'] != '']
+        if not translated_items.empty:
+            # 使用向量化操作批量保存
+            save_data = translated_items.apply(
+                lambda row: db_manager.save_translation_result(
+                    path, translation_direction, '数据集标签', row['dataset'], 
+                    'LABEL', row['original_label'], row['translated_label'], 
+                    row['translation_source'], row['needs_confirmation'] == 1
+                ), axis=1
+            )
+        
+        # 统计翻译结果
+        db_matched_count = len(df_result[df_result['translated_label'] != ''])
+        untranslated_count = len(df_result[df_result['translated_label'] == ''])
+        total_count = len(df_result)
+        
+        # 8. 转换为最终结果格式
+        dataset_labels = df_result[[
+            'dataset', 'original_label', 'translated_label', 
+            'translation_source', 'needs_confirmation', 'version'
+        ]].to_dict('records')
         
         result = {
             'success': True,
@@ -3803,205 +3765,17 @@ def generate_dataset_label():
                 'translation_direction': translation_direction,
                 'ig_version': ig_version,
                 'dataset_labels': dataset_labels,
-                'total_count': len(dataset_labels)
+                'summary': {
+                    'total': total_count,
+                    'db_matched': db_matched_count,
+                    'untranslated': untranslated_count
+                }
             }
         }
         
         return jsonify(result)
         
     except Exception as e:
-        return jsonify({'success': False, 'message': str(e)}), 500
-
-@app.route('/api/generate_variable_label_preview', methods=['POST'])
-def generate_variable_label_preview():
-    """生成变量Label预览（不执行AI翻译）"""
-    try:
-        data = request.get_json()
-        
-        # 验证必要字段
-        if not data.get('translation_direction') or not data.get('path'):
-            return jsonify({'success': False, 'message': '缺少翻译方向或项目路径配置'}), 400
-        
-        translation_direction = data.get('translation_direction')
-        path = data.get('path')
-        page = data.get('page', 1)
-        page_size = data.get('page_size', 100)
-        
-        # 获取翻译库配置
-        db_manager = DatabaseManager()
-        translation_config = db_manager.get_translation_library_config(path)
-        
-        if not translation_config:
-            return jsonify({'success': False, 'message': '未找到翻译库配置，请先保存配置'}), 400
-        
-        ig_version = translation_config.get('ig_version')
-        if not ig_version:
-            return jsonify({'success': False, 'message': '未找到IG版本配置'}), 400
-        
-        # 使用全局processor实例获取合并后的数据
-        # 确保processor已经加载了数据
-        if not processor.datasets:
-            success, message = processor.read_sas_files(path)
-            if not success:
-                return jsonify({'success': False, 'message': f'数据加载失败: {message}'})
-        
-        # 生成变量标签清单（预览模式，不执行AI翻译）
-        variable_labels = []
-        
-        # 遍历所有数据集和变量，生成变量标签信息
-        for dataset_name, dataset_info in processor.datasets.items():
-            df = dataset_info['data']
-            meta = dataset_info.get('meta')
-            
-            for column in df.columns:
-                # 获取变量的基本信息
-                original_label = ''
-                # 尝试从数据集元数据中获取变量标签
-                if meta and hasattr(meta, 'column_labels') and meta.column_labels:
-                    if isinstance(meta.column_labels, dict):
-                        original_label = meta.column_labels.get(column, '')
-                    elif isinstance(meta.column_labels, list):
-                        # 如果是列表，根据列的索引获取标签
-                        columns = list(df.columns)
-                        if column in columns:
-                            col_index = columns.index(column)
-                            if col_index < len(meta.column_labels):
-                                original_label = meta.column_labels[col_index] or ''
-                elif hasattr(df, 'attrs') and 'column_labels' in df.attrs:
-                    if isinstance(df.attrs['column_labels'], dict):
-                        original_label = df.attrs['column_labels'].get(column, '')
-                    elif isinstance(df.attrs['column_labels'], list):
-                        columns = list(df.columns)
-                        if column in columns:
-                            col_index = columns.index(column)
-                            if col_index < len(df.attrs['column_labels']):
-                                original_label = df.attrs['column_labels'][col_index] or ''
-                
-                translated_label = ''
-                translation_source = f'sdtm2variable_{ig_version}'
-                needs_confirmation = 'Y'
-                
-                # 检查是否为SUPP变量
-                if column.startswith('QNAM') or column.startswith('QVAL'):
-                    translation_source = f'supp_qnamlist_{ig_version}'
-                
-                # 实现从sdtm2variable和supp_qnamlist表的匹配逻辑
-                if original_label or column:  # 有原始标签或变量名时尝试匹配
-                    try:
-                        conn = sqlite3.connect('translation_db.sqlite')
-                        cursor = conn.cursor()
-                        
-                        # 检查是否为SUPP变量，使用不同的查询逻辑
-                        if column.startswith('QNAM') or column.startswith('QVAL'):
-                            # SUPP变量：从supp_qnamlist表查询
-                            if translation_direction == 'en_to_zh':
-                                # 英译中：从英文表查询QNAM，获取中文QLABEL
-                                cursor.execute(f"SELECT QNAM, QLABEL FROM supp_qnamlist_{ig_version}_en WHERE QNAM = ?", (column,))
-                                result = cursor.fetchone()
-                                print(f"SUPP变量 {column} 英文查询结果: {result}")  # 调试信息
-                                if result:
-                                    # 查询对应的中文翻译
-                                    cursor.execute(f"SELECT QLABEL FROM supp_qnamlist_{ig_version}_cn WHERE QNAM = ?", (result[0],))
-                                    cn_result = cursor.fetchone()
-                                    print(f"SUPP变量 {column} 中文查询结果: {cn_result}")  # 调试信息
-                                    if cn_result:
-                                        translated_label = cn_result[0]
-                                        needs_confirmation = 'N'
-                            else:
-                                # 中译英：从中文表查询QNAM，获取英文QLABEL
-                                cursor.execute(f"SELECT QNAM, QLABEL FROM supp_qnamlist_{ig_version}_cn WHERE QNAM = ?", (column,))
-                                result = cursor.fetchone()
-                                print(f"SUPP变量 {column} 中文查询结果: {result}")  # 调试信息
-                                if result:
-                                    # 查询对应的英文翻译
-                                    cursor.execute(f"SELECT QLABEL FROM supp_qnamlist_{ig_version}_en WHERE QNAM = ?", (result[0],))
-                                    en_result = cursor.fetchone()
-                                    print(f"SUPP变量 {column} 英文查询结果: {en_result}")  # 调试信息
-                                    if en_result:
-                                        translated_label = en_result[0]
-                                        needs_confirmation = 'N'
-                        else:
-                            # 普通变量：从sdtm2variable表查询
-                            if translation_direction == 'en_to_zh':
-                                # 英译中：从英文表查询变量名或标签，获取中文翻译
-                                table_name = f'sdtm2variable{ig_version}en'
-                                cursor.execute(f"SELECT Variable_Name, Variable_Label FROM {table_name} WHERE Variable_Name = ? OR Variable_Label = ?", 
-                                             (column, original_label))
-                                result = cursor.fetchone()
-                                print(f"普通变量 {column} 英文查询结果: {result}")  # 调试信息
-                                if result:
-                                    # 查询对应的中文翻译
-                                    cn_table = f'sdtm2variable{ig_version}cn'
-                                    cursor.execute(f"SELECT Variable_Label FROM {cn_table} WHERE Variable_Name = ?", (result[0],))
-                                    cn_result = cursor.fetchone()
-                                    print(f"普通变量 {column} 中文查询结果: {cn_result}")  # 调试信息
-                                    if cn_result:
-                                        translated_label = cn_result[0]
-                                        needs_confirmation = 'N'
-                            else:
-                                # 中译英：从中文表查询变量名或标签，获取英文翻译
-                                table_name = f'sdtm2variable{ig_version}cn'
-                                cursor.execute(f"SELECT Variable_Name, Variable_Label FROM {table_name} WHERE Variable_Name = ? OR Variable_Label = ?", 
-                                             (column, original_label))
-                                result = cursor.fetchone()
-                                print(f"普通变量 {column} 中文查询结果: {result}")  # 调试信息
-                                if result:
-                                    # 查询对应的英文翻译
-                                    en_table = f'sdtm2variable{ig_version}en'
-                                    cursor.execute(f"SELECT Variable_Label FROM {en_table} WHERE Variable_Name = ?", (result[0],))
-                                    en_result = cursor.fetchone()
-                                    print(f"普通变量 {column} 英文查询结果: {en_result}")  # 调试信息
-                                    if en_result:
-                                        translated_label = en_result[0]
-                                        needs_confirmation = 'N'
-                        
-                        print(f"变量 {column} 最终翻译结果: '{translated_label}'")  # 调试信息
-                        conn.close()
-                    except Exception as db_error:
-                        print(f"变量标签数据库查询错误: {db_error}")
-                        # 数据库查询失败时保持默认值
-                
-                variable_labels.append({
-                    'dataset': dataset_name,
-                    'variable': column,
-                    'original_label': original_label,
-                    'translated_label': translated_label,
-                    'translation_source': translation_source,
-                    'needs_confirmation': needs_confirmation
-                })
-        
-        # 按数据集名称和变量名称排序
-        variable_labels.sort(key=lambda x: (x['dataset'], x['variable']))
-        
-        # 分页计算
-        total_items = len(variable_labels)
-        total_pages = (total_items + page_size - 1) // page_size
-        start_idx = (page - 1) * page_size
-        end_idx = start_idx + page_size
-        paginated_items = variable_labels[start_idx:end_idx]
-        
-        result = {
-            'success': True,
-            'message': '变量Label预览生成成功',
-            'data': paginated_items,
-            'pagination': {
-                'current_page': page,
-                'page_size': page_size,
-                'total_pages': total_pages,
-                'total_items': total_items
-            },
-            'summary': {
-                'total_items': total_items,
-                'database_matched_items': sum(1 for item in variable_labels if item['translated_label']),
-                'ai_translation_needed': sum(1 for item in variable_labels if not item['translated_label'] and item['original_label'])
-            }
-        }
-        
-        print(f"变量标签预览生成完成（第{page}页，共{total_pages}页）: {len(paginated_items)} 项")
-        return jsonify(result)
-        
-    except Exception as e:
-        print(f"生成变量标签预览时出错: {str(e)}")
         return jsonify({'success': False, 'message': str(e)}), 500
 
 @app.route('/api/generate_variable_label', methods=['POST'])
@@ -4035,129 +3809,135 @@ def generate_variable_label():
         
         # 生成变量标签清单
         variable_labels = []
+        db_matched_count = 0
+        untranslated_count = 0
+        total_count = 0
         
-        # 遍历所有数据集和变量，生成变量标签信息
-        for dataset_name, dataset_info in processor.datasets.items():
+        # 1. 使用向量化操作收集所有数据集和变量信息
+        def extract_variable_info(dataset_name, dataset_info):
             df = dataset_info['data']
             meta = dataset_info.get('meta')
             
-            for column in df.columns:
-                # 获取变量的基本信息
-                original_label = ''
-                # 尝试从数据集元数据中获取变量标签
-                if meta and hasattr(meta, 'column_labels') and meta.column_labels:
-                    if isinstance(meta.column_labels, dict):
-                        original_label = meta.column_labels.get(column, '')
-                    elif isinstance(meta.column_labels, list):
-                        # 如果是列表，根据列的索引获取标签
-                        columns = list(df.columns)
-                        if column in columns:
-                            col_index = columns.index(column)
-                            if col_index < len(meta.column_labels):
-                                original_label = meta.column_labels[col_index] or ''
-                elif hasattr(df, 'attrs') and 'column_labels' in df.attrs:
-                    if isinstance(df.attrs['column_labels'], dict):
-                        original_label = df.attrs['column_labels'].get(column, '')
-                    elif isinstance(df.attrs['column_labels'], list):
-                        columns = list(df.columns)
-                        if column in columns:
-                            col_index = columns.index(column)
-                            if col_index < len(df.attrs['column_labels']):
-                                original_label = df.attrs['column_labels'][col_index] or ''
-                
-                translated_label = ''
-                translation_source = f'sdtm2variable_{ig_version}'
-                needs_confirmation = 'Y'
-                
-                # 检查是否为SUPP变量
-                if column.startswith('QNAM') or column.startswith('QVAL'):
-                    translation_source = f'supp_qnamlist_{ig_version}'
-                
-                # 实现从sdtm2variable和supp_qnamlist表的匹配逻辑
-                if original_label or column:  # 有原始标签或变量名时尝试匹配
+            # 使用向量化操作处理列信息
+            columns = list(df.columns)
+            original_labels = []
+            
+            # 批量处理标签提取
+            if meta and hasattr(meta, 'column_labels') and meta.column_labels:
+                for i, column in enumerate(columns):
                     try:
-                        conn = sqlite3.connect('translation_db.sqlite')
-                        cursor = conn.cursor()
-                        
-                        # 检查是否为SUPP变量，使用不同的查询逻辑
-                        if column.startswith('QNAM') or column.startswith('QVAL'):
-                            # SUPP变量：从supp_qnamlist表查询
-                            if translation_direction == 'en_to_zh':
-                                # 英译中：从英文表查询QNAM，获取中文QLABEL
-                                cursor.execute("SELECT QNAM, QLABEL FROM supp_qnamlist_en WHERE QNAM = ?", (column,))
-                                result = cursor.fetchone()
-                                if result:
-                                    # 查询对应的中文翻译
-                                    cursor.execute("SELECT QLABEL FROM supp_qnamlist_cn WHERE QNAM = ?", (result[0],))
-                                    cn_result = cursor.fetchone()
-                                    if cn_result:
-                                        translated_label = cn_result[0]
-                                        needs_confirmation = 'N'
-                            else:
-                                # 中译英：从中文表查询QNAM，获取英文QLABEL
-                                cursor.execute("SELECT QNAM, QLABEL FROM supp_qnamlist_cn WHERE QNAM = ?", (column,))
-                                result = cursor.fetchone()
-                                if result:
-                                    # 查询对应的英文翻译
-                                    cursor.execute("SELECT QLABEL FROM supp_qnamlist_en WHERE QNAM = ?", (result[0],))
-                                    en_result = cursor.fetchone()
-                                    if en_result:
-                                        translated_label = en_result[0]
-                                        needs_confirmation = 'N'
+                        if i < len(meta.column_labels):
+                            original_label = meta.column_labels[i] or column
                         else:
-                            # 普通变量：从sdtm2variable表查询
-                            if translation_direction == 'en_to_zh':
-                                # 英译中：从英文表查询变量名或标签，获取中文翻译
-                                table_name = f'sdtm2variable{ig_version}en'
-                                cursor.execute(f"SELECT Variable_Name, Variable_Label FROM {table_name} WHERE Variable_Name = ? OR Variable_Label = ?", 
-                                             (column, original_label))
-                                result = cursor.fetchone()
-                                if result:
-                                    # 查询对应的中文翻译
-                                    cn_table = f'sdtm2variable{ig_version}cn'
-                                    cursor.execute(f"SELECT Variable_Label FROM {cn_table} WHERE Variable_Name = ?", (result[0],))
-                                    cn_result = cursor.fetchone()
-                                    if cn_result:
-                                        translated_label = cn_result[0]
-                                        needs_confirmation = 'N'
-                            else:
-                                # 中译英：从中文表查询变量名或标签，获取英文翻译
-                                table_name = f'sdtm2variable{ig_version}cn'
-                                cursor.execute(f"SELECT Variable_Name, Variable_Label FROM {table_name} WHERE Variable_Name = ? OR Variable_Label = ?", 
-                                             (column, original_label))
-                                result = cursor.fetchone()
-                                if result:
-                                    # 查询对应的英文翻译
-                                    en_table = f'sdtm2variable{ig_version}en'
-                                    cursor.execute(f"SELECT Variable_Label FROM {en_table} WHERE Variable_Name = ?", (result[0],))
-                                    en_result = cursor.fetchone()
-                                    if en_result:
-                                        translated_label = en_result[0]
-                                        needs_confirmation = 'N'
-                        
-                        conn.close()
-                    except Exception as db_error:
-                        print(f"变量标签数据库查询错误: {db_error}")
-                        # 数据库查询失败时保持默认值
-                
-                # 如果翻译库无法匹配，使用AI翻译
-                if not translated_label and original_label and translation_direction == 'en_to_zh':
-                    ai_result = translation_service.translate_text(
-                        original_label, 'en', 'zh', 'medical'
-                    )
-                    if ai_result.get('success'):
-                        translated_label = ai_result.get('translated_text', '')
-                        translation_source = 'AI'
-                        needs_confirmation = 'Y'  # AI翻译需要确认
-                
-                variable_labels.append({
+                            original_label = column
+                    except (ValueError, IndexError):
+                        original_label = column
+                    original_labels.append(original_label)
+            else:
+                original_labels = columns
+            
+            # 使用列表推导式批量创建变量数据
+            variables_data = [
+                {
                     'dataset': dataset_name,
                     'variable': column,
-                    'original_label': original_label,
+                    'original_label': original_label
+                }
+                for column, original_label in zip(columns, original_labels)
+            ]
+            return variables_data
+        
+        # 使用列表推导式批量处理所有数据集
+        all_variables_data = [
+            var_info
+            for dataset_name, dataset_info in processor.datasets.items()
+            for var_info in extract_variable_info(dataset_name, dataset_info)
+        ]
+        
+        total_count = len(all_variables_data)
+        
+        # 2. 创建DataFrame进行批量处理
+        import pandas as pd
+        df_variables = pd.DataFrame(all_variables_data)
+        
+        # 3. 批量查询数据库翻译
+        all_variables = [(row['dataset'], row['variable']) for _, row in df_variables.iterrows()]
+        batch_translations = db_manager.get_batch_variable_translations(all_variables, ig_version)
+        
+        # 4. 使用pandas left join进行批量连接
+        # 创建翻译结果DataFrame
+        translation_data = []
+        for (dataset, variable), translation in batch_translations.items():
+            translated_label = ''
+            if translation_direction == 'en_to_zh':
+                translated_label = translation.get('name_cn', '')
+            else:
+                translated_label = translation.get('name_en', '')
+            
+            if translated_label:
+                translation_data.append({
+                    'dataset': dataset,
+                    'variable': variable,
                     'translated_label': translated_label,
-                    'translation_source': translation_source,
-                    'needs_confirmation': needs_confirmation
+                    'translation_source': ig_version,
+                    'needs_confirmation': False
                 })
+        
+        df_translations = pd.DataFrame(translation_data)
+        
+        # 5. Left join合并数据，连接不上的输出空值
+        if not df_translations.empty:
+            df_result = df_variables.merge(
+                df_translations, 
+                on=['dataset', 'variable'], 
+                how='left'
+            )
+        else:
+            df_result = df_variables.copy()
+            df_result['translated_label'] = ''
+            df_result['translation_source'] = ''
+            df_result['needs_confirmation'] = True
+        
+        # 6. 使用向量化操作处理结果
+        df_result['translated_label'] = df_result['translated_label'].fillna('')
+        df_result['translation_source'] = df_result['translation_source'].fillna('')
+        df_result['needs_confirmation'] = df_result['needs_confirmation'].fillna(True)
+        
+        # 统计数据库匹配数量
+        db_matched_count = len(df_result[df_result['translated_label'] != ''])
+        untranslated_count = total_count - db_matched_count
+        
+        # 7. 使用向量化操作批量保存翻译结果到数据库
+        # 只保存有翻译结果的记录
+        translated_results = df_result[df_result['translated_label'] != '']
+        if not translated_results.empty:
+            # 使用apply进行向量化处理
+            translated_results.apply(
+                lambda row: db_manager.save_translation_result(
+                    path, translation_direction, '变量标签', row['dataset'], 
+                    row['variable'], row['original_label'], row['translated_label'], 
+                    row['translation_source'], row['needs_confirmation']
+                ), axis=1
+            )
+        
+        # 8. 转换为最终结果格式
+        df_result['needs_confirmation_str'] = df_result['needs_confirmation'].apply(
+            lambda x: 'Y' if x else 'N'
+        )
+        df_result['version'] = ig_version
+        
+        # 使用向量化操作构建最终结果
+        variable_labels = df_result[[
+            'dataset', 'variable', 'original_label', 'translated_label', 
+            'translation_source', 'needs_confirmation_str', 'version'
+        ]].rename(columns={'needs_confirmation_str': 'needs_confirmation'}).to_dict('records')
+        
+        # 9. 对结果进行排序：数据库翻译在前，按数据集名称和变量名排序
+        variable_labels.sort(key=lambda x: (
+            0 if x['translation_source'] else 1,  # 有翻译的优先
+            x['dataset'],  # 按数据集名称排序
+            x['variable']  # 按变量名排序
+        ))
         
         result = {
             'success': True,
@@ -4166,7 +3946,11 @@ def generate_variable_label():
                 'translation_direction': translation_direction,
                 'ig_version': ig_version,
                 'variable_labels': variable_labels,
-                'total_count': len(variable_labels)
+                'summary': {
+                    'total': total_count,
+                    'db_matched': db_matched_count,
+                    'untranslated': untranslated_count
+                }
             }
         }
         
@@ -4186,151 +3970,68 @@ class DeepSeekTranslationService:
             'Content-Type': 'application/json',
             'Authorization': f'Bearer {self.api_key}'
         }
-        self.max_retries = 3
-        self.timeout = 60  # 增加超时时间到60秒
-        
-        # 性能统计
-        self.stats = {
-            'total_requests': 0,
-            'successful_requests': 0,
-            'failed_requests': 0,
-            'total_time': 0,
-            'retry_count': 0
-        }
-    
-    def get_stats(self):
-        """获取翻译统计信息"""
-        if self.stats['total_requests'] > 0:
-            success_rate = (self.stats['successful_requests'] / self.stats['total_requests']) * 100
-            avg_time = self.stats['total_time'] / self.stats['total_requests']
-        else:
-            success_rate = 0
-            avg_time = 0
-        
-        return {
-            'total_requests': self.stats['total_requests'],
-            'successful_requests': self.stats['successful_requests'],
-            'failed_requests': self.stats['failed_requests'],
-            'success_rate': f'{success_rate:.1f}%',
-            'average_time': f'{avg_time:.2f}s',
-            'retry_count': self.stats['retry_count']
-        }
     
     def translate_text(self, text, source_lang='en', target_lang='zh', context='medical'):
-        """翻译文本，带重试机制和性能统计"""
-        import time
-        start_time = time.time()
-        self.stats['total_requests'] += 1
-        
-        if not self.api_key:
-            self.stats['failed_requests'] += 1
+        """翻译文本"""
+        try:
+            if not self.api_key:
+                raise ValueError('DeepSeek API密钥未配置')
+            
+            # 构建翻译提示词
+            if context == 'medical':
+                system_prompt = f"你是一个专业的临床医学SAS数据集翻译专家。请将以下{source_lang}文本准确翻译为{target_lang}，保持医学术语的专业性和准确性。"
+            else:
+                system_prompt = f"请将以下{source_lang}文本翻译为{target_lang}，保持原意和专业性。"
+            
+            payload = {
+                'model': 'deepseek-chat',
+                'messages': [
+                    {'role': 'system', 'content': system_prompt},
+                    {'role': 'user', 'content': text}
+                ],
+                'temperature': 0.1,
+                'max_tokens': 2000
+            }
+            
+            response = requests.post(self.base_url, headers=self.headers, json=payload, timeout=30)
+            response.raise_for_status()
+            
+            result = response.json()
+            translated_text = result['choices'][0]['message']['content'].strip()
+            
+            return {
+                'success': True,
+                'translated_text': translated_text,
+                'original_text': text,
+                'source_lang': source_lang,
+                'target_lang': target_lang
+            }
+            
+        except requests.exceptions.RequestException as e:
             return {
                 'success': False,
-                'error': 'DeepSeek API密钥未配置',
+                'error': f'API请求失败: {str(e)}',
                 'original_text': text
             }
-        
-        # 构建翻译提示词
-        if context == 'medical':
-            system_prompt = f"你是一个专业的临床医学SAS数据集翻译专家。请将以下{source_lang}文本准确翻译为{target_lang}，保持医学术语的专业性和准确性。"
-        else:
-            system_prompt = f"请将以下{source_lang}文本翻译为{target_lang}，保持原意和专业性。"
-        
-        payload = {
-            'model': 'deepseek-chat',
-            'messages': [
-                {'role': 'system', 'content': system_prompt},
-                {'role': 'user', 'content': text}
-            ],
-            'temperature': 0.1,
-            'max_tokens': 2000
-        }
-        
-        # 重试机制
-        for attempt in range(self.max_retries):
-            try:
-                if attempt > 0:
-                    self.stats['retry_count'] += 1
-                    print(f"AI翻译重试 {attempt}/{self.max_retries}: {text[:50]}...")
-                
-                response = requests.post(self.base_url, headers=self.headers, json=payload, timeout=self.timeout)
-                response.raise_for_status()
-                
-                result = response.json()
-                translated_text = result['choices'][0]['message']['content'].strip()
-                
-                # 记录成功统计
-                elapsed_time = time.time() - start_time
-                self.stats['successful_requests'] += 1
-                self.stats['total_time'] += elapsed_time
-                
-                if attempt > 0:
-                    print(f"AI翻译重试成功: {text[:30]}... -> {translated_text[:30]}... (耗时: {elapsed_time:.2f}s)")
-                
-                return {
-                    'success': True,
-                    'translated_text': translated_text,
-                    'original_text': text,
-                    'source_lang': source_lang,
-                    'target_lang': target_lang,
-                    'elapsed_time': elapsed_time
-                }
-                
-            except requests.exceptions.Timeout:
-                error_msg = f'API请求超时 (尝试 {attempt + 1}/{self.max_retries})'
-                print(f"AI翻译超时: {error_msg} - 文本: {text[:50]}...")
-                if attempt == self.max_retries - 1:
-                    self.stats['failed_requests'] += 1
-                    elapsed_time = time.time() - start_time
-                    self.stats['total_time'] += elapsed_time
-                    return {
-                        'success': False,
-                        'error': error_msg,
-                        'original_text': text,
-                        'elapsed_time': elapsed_time
-                    }
-            except requests.exceptions.RequestException as e:
-                error_msg = f'API请求失败: {str(e)} (尝试 {attempt + 1}/{self.max_retries})'
-                print(f"AI翻译请求失败: {error_msg} - 文本: {text[:50]}...")
-                if attempt == self.max_retries - 1:
-                    self.stats['failed_requests'] += 1
-                    elapsed_time = time.time() - start_time
-                    self.stats['total_time'] += elapsed_time
-                    return {
-                        'success': False,
-                        'error': error_msg,
-                        'original_text': text,
-                        'elapsed_time': elapsed_time
-                    }
-            except Exception as e:
-                error_msg = f'翻译失败: {str(e)} (尝试 {attempt + 1}/{self.max_retries})'
-                print(f"AI翻译异常: {error_msg} - 文本: {text[:50]}...")
-                if attempt == self.max_retries - 1:
-                    self.stats['failed_requests'] += 1
-                    elapsed_time = time.time() - start_time
-                    self.stats['total_time'] += elapsed_time
-                    return {
-                        'success': False,
-                        'error': error_msg,
-                        'original_text': text,
-                        'elapsed_time': elapsed_time
-                    }
-            
-            # 重试前等待
-            if attempt < self.max_retries - 1:
-                wait_time = 2 ** attempt
-                print(f"AI翻译等待 {wait_time}s 后重试...")
-                time.sleep(wait_time)  # 指数退避
+        except Exception as e:
+            return {
+                'success': False,
+                'error': f'翻译失败: {str(e)}',
+                'original_text': text
+            }
     
-    def batch_translate(self, texts, source_lang='en', target_lang='zh', context='medical', batch_size=5):
-        """优化的批量翻译，支持真正的批量处理"""
+    def batch_translate(self, texts, source_lang='en', target_lang='zh', context='medical'):
+        """批量翻译 - 优化版本，真正的批量处理"""
         if not texts:
             return []
         
-        results = []
-        
-        # 过滤空文本
-        valid_texts = [(i, text) for i, text in enumerate(texts) if text and text.strip()]
+        # 过滤空文本并记录索引
+        valid_texts = []
+        text_indices = []
+        for i, text in enumerate(texts):
+            if text and text.strip():
+                valid_texts.append(text.strip())
+                text_indices.append(i)
         
         if not valid_texts:
             return [{
@@ -4341,66 +4042,90 @@ class DeepSeekTranslationService:
                 'target_lang': target_lang
             } for text in texts]
         
-        # 分批处理
-        for batch_start in range(0, len(valid_texts), batch_size):
-            batch_end = min(batch_start + batch_size, len(valid_texts))
-            batch_items = valid_texts[batch_start:batch_end]
+        try:
+            if not self.api_key:
+                raise ValueError('DeepSeek API密钥未配置')
             
-            # 构建批量翻译请求
-            batch_text = '\n'.join([f'{i+1}. {text}' for i, (_, text) in enumerate(batch_items)])
-            
+            # 构建批量翻译提示词
             if context == 'medical':
-                system_prompt = f"你是一个专业的临床医学SAS数据集翻译专家。请将以下{source_lang}文本准确翻译为{target_lang}，保持医学术语的专业性和准确性。请按序号返回翻译结果，每行一个。"
+                system_prompt = f"你是一个专业的临床医学SAS数据集翻译专家。请将以下{source_lang}文本准确翻译为{target_lang}，保持医学术语的专业性和准确性。请按照输入的顺序逐行翻译，每行一个翻译结果，不要添加额外的解释或编号。"
             else:
-                system_prompt = f"请将以下{source_lang}文本翻译为{target_lang}，保持原意和专业性。请按序号返回翻译结果，每行一个。"
+                system_prompt = f"请将以下{source_lang}文本翻译为{target_lang}，保持原意和专业性。请按照输入的顺序逐行翻译，每行一个翻译结果，不要添加额外的解释或编号。"
             
-            batch_result = self.translate_text(batch_text, source_lang, target_lang, context)
+            # 将多个文本合并为一个请求，用换行符分隔
+            batch_text = '\n'.join(valid_texts)
             
-            if batch_result.get('success'):
-                translated_lines = batch_result.get('translated_text', '').strip().split('\n')
-                
-                for i, (original_index, original_text) in enumerate(batch_items):
-                    if i < len(translated_lines):
-                        # 提取翻译结果（去除序号）
-                        translated = translated_lines[i].strip()
-                        if '. ' in translated and translated.split('.')[0].isdigit():
-                            translated = translated.split('. ', 1)[1]
-                        
-                        results.append((original_index, {
-                            'success': True,
-                            'translated_text': translated,
-                            'original_text': original_text,
-                            'source_lang': source_lang,
-                            'target_lang': target_lang
-                        }))
-                    else:
-                        # 批量翻译结果不足，回退到单独翻译
-                        single_result = self.translate_text(original_text, source_lang, target_lang, context)
-                        results.append((original_index, single_result))
+            payload = {
+                'model': 'deepseek-chat',
+                'messages': [
+                    {'role': 'system', 'content': system_prompt},
+                    {'role': 'user', 'content': batch_text}
+                ],
+                'temperature': 0.1,
+                'max_tokens': 4000  # 增加token限制以支持批量翻译
+            }
+            
+            response = requests.post(self.base_url, headers=self.headers, json=payload, timeout=60)
+            response.raise_for_status()
+            
+            result = response.json()
+            translated_batch = result['choices'][0]['message']['content'].strip()
+            
+            # 分割批量翻译结果
+            translated_lines = translated_batch.split('\n')
+            
+            # 构建结果数组
+            results = [None] * len(texts)
+            
+            # 填充有效翻译结果
+            for i, (original_idx, original_text) in enumerate(zip(text_indices, valid_texts)):
+                translated_text = translated_lines[i].strip() if i < len(translated_lines) else ''
+                results[original_idx] = {
+                    'success': True,
+                    'translated_text': translated_text,
+                    'original_text': original_text,
+                    'source_lang': source_lang,
+                    'target_lang': target_lang
+                }
+            
+            # 填充空文本结果
+            for i, text in enumerate(texts):
+                if results[i] is None:
+                    results[i] = {
+                        'success': True,
+                        'translated_text': '',
+                        'original_text': text,
+                        'source_lang': source_lang,
+                        'target_lang': target_lang
+                    }
+            
+            return results
+            
+        except requests.exceptions.RequestException as e:
+            # 如果批量翻译失败，回退到逐个翻译
+            print(f"批量翻译失败，回退到逐个翻译: {str(e)}")
+            return self._fallback_individual_translate(texts, source_lang, target_lang, context)
+        except Exception as e:
+            # 如果批量翻译失败，回退到逐个翻译
+            print(f"批量翻译异常，回退到逐个翻译: {str(e)}")
+            return self._fallback_individual_translate(texts, source_lang, target_lang, context)
+    
+    def _fallback_individual_translate(self, texts, source_lang='en', target_lang='zh', context='medical'):
+        """回退方案：逐个翻译"""
+        results = []
+        for text in texts:
+            if text and text.strip():
+                result = self.translate_text(text, source_lang, target_lang, context)
+                results.append(result)
             else:
-                # 批量翻译失败，回退到单独翻译
-                print(f"批量翻译失败，回退到单独翻译: {batch_result.get('error')}")
-                for original_index, original_text in batch_items:
-                    single_result = self.translate_text(original_text, source_lang, target_lang, context)
-                    results.append((original_index, single_result))
-        
-        # 重新排序结果
-        final_results = [None] * len(texts)
-        for original_index, result in results:
-            final_results[original_index] = result
-        
-        # 填充空文本的结果
-        for i, text in enumerate(texts):
-            if final_results[i] is None:
-                final_results[i] = {
+                results.append({
                     'success': True,
                     'translated_text': '',
                     'original_text': text,
                     'source_lang': source_lang,
                     'target_lang': target_lang
-                }
-        
-        return final_results
+                })
+        return results
 
 # 创建翻译服务实例
 translation_service = DeepSeekTranslationService()
@@ -4410,40 +4135,42 @@ def translate_text():
     """文本翻译API"""
     try:
         data = request.get_json()
-        text = data.get('text', '')
+        
+        # 支持两种模式：直接翻译文本 或 通过记录ID翻译并更新数据库
+        text = data.get('text')
+        record_id = data.get('record_id')
         source_lang = data.get('source_lang', 'en')
         target_lang = data.get('target_lang', 'zh')
         context = data.get('context', 'medical')
+        save_to_db = data.get('save_to_db', True)  # 新增参数，默认保存到数据库
+        
+        # 如果提供了record_id，从数据库获取原始值
+        if record_id:
+            db_manager = DatabaseManager()
+            record = db_manager.get_translation_result_by_id(record_id)
+            if not record:
+                return jsonify({'success': False, 'message': '未找到指定的翻译记录'}), 404
+            text = record['original_value']
         
         if not text:
-            return jsonify({
-                'success': False,
-                'error': '文本不能为空'
-            }), 400
+            return jsonify({'success': False, 'message': '缺少要翻译的文本'}), 400
         
+        # 调用翻译服务
         result = translation_service.translate_text(text, source_lang, target_lang, context)
+        
+        # 如果提供了record_id且翻译成功且需要保存到数据库，更新数据库记录
+        if record_id and result.get('success') and save_to_db:
+            db_manager.update_translation_result(
+                record_id,
+                translated_value=result.get('translated_text'),
+                translation_source='AI',
+                needs_confirmation=True
+            )
+        
         return jsonify(result)
         
     except Exception as e:
-        return jsonify({
-            'success': False,
-            'error': f'翻译服务错误: {str(e)}'
-        }), 500
-
-@app.route('/api/translation_stats', methods=['GET'])
-def get_translation_stats():
-    """获取AI翻译统计信息"""
-    try:
-        stats = translation_service.get_stats()
-        return jsonify({
-            'success': True,
-            'stats': stats
-        })
-    except Exception as e:
-        return jsonify({
-            'success': False,
-            'error': f'获取统计信息失败: {str(e)}'
-        }), 500
+        return jsonify({'success': False, 'message': str(e)}), 500
 
 @app.route('/api/batch_translate', methods=['POST'])
 def batch_translate():
@@ -4495,58 +4222,238 @@ def check_translation_service():
             'message': f'检查翻译服务时出错: {str(e)}'
         })
 
-# 进度追踪相关函数
-def create_progress_task(task_name):
-    """创建一个新的进度追踪任务"""
-    task_id = str(uuid.uuid4())
-    with progress_lock:
-        progress_store[task_id] = {
-            'task_name': task_name,
-            'progress': 0,
-            'status': 'running',
-            'message': '准备开始...',
-            'created_at': time.time(),
-            'updated_at': time.time()
-        }
-    return task_id
+@app.route('/api/translation_results', methods=['GET'])
+def get_translation_results():
+    """获取翻译结果"""
+    try:
+        path = request.args.get('path')
+        translation_type = request.args.get('translation_type')
+        dataset_name = request.args.get('dataset_name')
+        variable_name = request.args.get('variable_name')
+        page = int(request.args.get('page', 1))
+        page_size = int(request.args.get('page_size', 50))
+        
+        if not path:
+            return jsonify({'success': False, 'message': '缺少path参数'}), 400
+        
+        results = db_manager.get_translation_results(
+            path=path,
+            translation_type=translation_type,
+            dataset_name=dataset_name,
+            variable_name=variable_name,
+            page=page,
+            page_size=page_size
+        )
+        
+        return jsonify({
+            'success': True,
+            'data': results
+        })
+        
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
 
-def update_progress(task_id, progress, message, status='running'):
-    """更新任务进度"""
-    with progress_lock:
-        if task_id in progress_store:
-            progress_store[task_id].update({
-                'progress': progress,
-                'message': message,
-                'status': status,
-                'updated_at': time.time()
-            })
-
-def complete_progress(task_id, message='任务完成'):
-    """完成任务进度"""
-    update_progress(task_id, 100, message, 'completed')
-
-def fail_progress(task_id, message='任务失败'):
-    """标记任务失败"""
-    update_progress(task_id, -1, message, 'failed')
-
-@app.route('/api/progress/<task_id>', methods=['GET'])
-def get_progress(task_id):
-    """获取任务进度"""
-    with progress_lock:
-        if task_id in progress_store:
-            progress_data = progress_store[task_id].copy()
-            # 清理超过1小时的已完成任务
-            if progress_data['status'] in ['completed', 'failed'] and time.time() - progress_data['updated_at'] > 3600:
-                del progress_store[task_id]
-            return jsonify(progress_data)
+@app.route('/api/translation_results/<int:result_id>', methods=['PUT'])
+def update_translation_result(result_id):
+    """更新翻译结果"""
+    try:
+        data = request.get_json()
+        
+        translated_value = data.get('translated_value')
+        needs_confirmation = data.get('needs_confirmation')
+        is_confirmed = data.get('is_confirmed')
+        comments = data.get('comments')
+        translation_source = data.get('translation_source', 'AI')  # 默认设置为AI
+        
+        success = db_manager.update_translation_result(
+            result_id=result_id,
+            translated_value=translated_value,
+            translation_source=translation_source,
+            needs_confirmation=needs_confirmation,
+            is_confirmed=is_confirmed,
+            comments=comments
+        )
+        
+        if success:
+            return jsonify({'success': True, 'message': '翻译结果更新成功'})
         else:
-            return jsonify({'error': '任务不存在'}), 404
+            return jsonify({'success': False, 'message': '翻译结果更新失败'}), 400
+        
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
 
-@app.route('/api/progress', methods=['GET'])
-def get_all_progress():
-    """获取所有进度任务（调试用）"""
-    with progress_lock:
-        return jsonify(progress_store)
+@app.route('/api/translation_stats', methods=['GET'])
+def get_translation_stats():
+    """获取翻译统计信息"""
+    try:
+        path = request.args.get('path')
+        
+        if not path:
+            return jsonify({'success': False, 'message': '缺少path参数'}), 400
+        
+        stats = db_manager.get_translation_stats(path)
+        
+        return jsonify({
+            'success': True,
+            'data': stats
+        })
+        
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+@app.route('/api/translation_check', methods=['POST'])
+def perform_translation_check():
+    """执行翻译核查"""
+    try:
+        data = request.get_json()
+        path = data.get('path')
+        
+        if not path:
+            return jsonify({'success': False, 'message': '缺少path参数'}), 400
+        
+        checked_items = db_manager.perform_translation_check(path)
+        
+        return jsonify({
+            'success': True,
+            'data': checked_items,
+            'message': f'翻译核查完成，共处理 {len(checked_items)} 个问题项目'
+        })
+        
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+@app.route('/api/translation_results/<int:result_id>', methods=['DELETE'])
+def delete_translation_result(result_id):
+    """删除翻译结果"""
+    try:
+        success = db_manager.delete_translation_result(result_id)
+        
+        if success:
+            return jsonify({'success': True, 'message': '翻译结果删除成功'})
+        else:
+            return jsonify({'success': False, 'message': '翻译结果删除失败'}), 400
+        
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+@app.route('/api/batch_confirm_translations', methods=['POST'])
+def batch_confirm_translations():
+    """批量确认翻译结果"""
+    try:
+        data = request.get_json()
+        items = data.get('items', [])
+        
+        if not items:
+            return jsonify({'success': False, 'message': '没有要确认的项目'}), 400
+        
+        success_count = 0
+        for item in items:
+            result_id = item.get('id')
+            translated_value = item.get('translated_value')
+            needs_confirmation = item.get('needs_confirmation', False)
+            is_confirmed = item.get('is_confirmed', True)
+            
+            if db_manager.update_translation_result(
+                result_id=result_id,
+                translated_value=translated_value,
+                needs_confirmation=needs_confirmation,
+                is_confirmed=is_confirmed
+            ):
+                success_count += 1
+        
+        return jsonify({
+            'success': True,
+            'message': f'批量确认完成，成功确认 {success_count} 个项目'
+        })
+        
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/batch_save_translations', methods=['POST'])
+def batch_save_translations():
+    """批量保存翻译结果"""
+    try:
+        data = request.get_json()
+        items = data.get('items', [])
+        
+        if not items:
+            return jsonify({'success': False, 'message': '没有要保存的项目'}), 400
+        
+        success_count = 0
+        for item in items:
+            result_id = item.get('id')
+            translated_value = item.get('translated_value')
+            translation_source = item.get('translation_source', 'AI')
+            needs_confirmation = item.get('needs_confirmation')
+            
+            if db_manager.update_translation_result(
+                result_id=result_id,
+                translated_value=translated_value,
+                translation_source=translation_source,
+                needs_confirmation=needs_confirmation
+            ):
+                success_count += 1
+        
+        return jsonify({
+            'success': True,
+            'message': f'批量保存完成，成功保存 {success_count} 个项目'
+        })
+        
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+@app.route('/api/export_translations', methods=['POST'])
+def export_translations():
+    """导出翻译数据为xlsx文件"""
+    try:
+        data = request.get_json()
+        path = data.get('path')
+        
+        if not path:
+            return jsonify({'success': False, 'message': '缺少path参数'}), 400
+        
+        # 获取所有翻译数据
+        all_results = db_manager.get_all_translation_results(path)
+        
+        if not all_results:
+            return jsonify({'success': False, 'message': '没有数据可导出'}), 400
+        
+        # 创建DataFrame
+        df_data = []
+        for item in all_results:
+            df_data.append({
+                '编码类型': item.get('translation_type', ''),
+                '数据集': item.get('dataset_name', ''),
+                '变量': item.get('variable_name', ''),
+                '原始值': item.get('original_value', ''),
+                '翻译值': item.get('translated_value', ''),
+                '翻译来源': item.get('translation_source', ''),
+                '备注': item.get('comments', ''),
+                '是否确认': '是' if not item.get('needs_confirmation', True) else '否'
+            })
+        
+        df = pd.DataFrame(df_data)
+        
+        # 创建临时文件
+        import tempfile
+        import io
+        
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            df.to_excel(writer, sheet_name='翻译清单', index=False)
+        
+        output.seek(0)
+        
+        return send_file(
+            output,
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            as_attachment=True,
+            download_name='翻译清单.xlsx'
+        )
+        
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=5000)

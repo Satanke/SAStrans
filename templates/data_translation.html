@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>数据翻译 - SAS翻译平台</title>
+    <link href="{{ url_for('static', filename='css/bootstrap.min.css') }}" rel="stylesheet">
+    <link href="{{ url_for('static', filename='css/all.min.css') }}" rel="stylesheet">
+    <link href="{{ url_for('static', filename='css/style.css') }}" rel="stylesheet">
+    <style>
+        .translation-container {
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        .form-section {
+            background: #f8f9fa;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+        }
+        .path-input {
+            margin-bottom: 15px;
+        }
+        .encoding-section {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            margin-top: 15px;
+        }
+        .btn-translate {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            border: none;
+            color: white;
+            padding: 12px 30px;
+            font-size: 16px;
+            border-radius: 6px;
+            transition: all 0.3s ease;
+        }
+        .btn-translate:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+            color: white;
+        }
+        .btn-translate:disabled {
+            background: #6c757d;
+            transform: none;
+            box-shadow: none;
+        }
+        .progress-section {
+            display: none;
+            margin-top: 20px;
+        }
+        .result-section {
+            margin-top: 20px;
+        }
+        .alert {
+            margin-top: 15px;
+        }
+        .back-btn {
+            margin-bottom: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container-fluid">
+        <!-- 导航栏 -->
+        <nav class="navbar navbar-expand-lg navbar-dark bg-primary">
+            <div class="container">
+                <a class="navbar-brand" href="/">
+                    <i class="fas fa-language me-2"></i>
+                    SAS翻译平台
+                </a>
+
+            </div>
+        </nav>
+
+        <!-- 主要内容 -->
+        <div class="translation-container">
+            <div class="mb-4">
+                <h2>
+                    <i class="fas fa-file-export me-2"></i>
+                    数据翻译
+                </h2>
+            </div>
+
+            <!-- 翻译配置表单 -->
+            <div class="form-section">
+                <h5 class="mb-3">
+                    <i class="fas fa-cog me-2"></i>
+                    翻译配置
+                </h5>
+                
+                <form id="translationForm">
+                    <!-- 输出路径 -->
+                    <div class="path-input">
+                        <label for="outputPath" class="form-label">
+                            <i class="fas fa-folder me-1"></i>
+                            输出数据集路径
+                        </label>
+                        <div class="input-group">
+                            <input type="text" class="form-control" id="outputPath" 
+                                   placeholder="请输入翻译后数据集的输出路径" required>
+                            <button class="btn btn-outline-secondary" type="button" id="browseOutputBtn">
+                                <i class="fas fa-search"></i>
+                                浏览
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- 编码选择和翻译按钮 -->
+                    <div class="encoding-section">
+                        <label class="form-label mb-0">
+                            <i class="fas fa-code me-1"></i>
+                            数据编码：
+                        </label>
+                        <div class="form-check form-check-inline">
+                            <input class="form-check-input" type="radio" name="encoding" 
+                                   id="encodingUTF8" value="utf-8" checked>
+                            <label class="form-check-label" for="encodingUTF8">
+                                UTF-8
+                            </label>
+                        </div>
+                        <div class="form-check form-check-inline">
+                            <input class="form-check-input" type="radio" name="encoding" 
+                                   id="encodingDBCS" value="dbcs">
+                            <label class="form-check-label" for="encodingDBCS">
+                                DBCS
+                            </label>
+                        </div>
+                        <button type="submit" class="btn btn-translate ms-auto" id="translateBtn">
+                            <i class="fas fa-play me-2"></i>
+                            确认翻译
+                        </button>
+                    </div>
+                </form>
+            </div>
+
+            <!-- 进度显示 -->
+            <div class="progress-section" id="progressSection">
+                <div class="card">
+                    <div class="card-body text-center">
+                        <div class="spinner-border text-primary mb-3" role="status">
+                            <span class="visually-hidden">翻译中...</span>
+                        </div>
+                        <h6>正在翻译数据集...</h6>
+                        <p class="text-muted mb-0">请稍候，这可能需要几分钟时间</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 结果显示 -->
+            <div class="result-section" id="resultSection">
+                <!-- 结果将通过JavaScript动态插入 -->
+            </div>
+        </div>
+    </div>
+
+    <!-- 确认模态框 -->
+    <div class="modal fade" id="confirmModal" tabindex="-1">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">
+                        <i class="fas fa-exclamation-triangle text-warning me-2"></i>
+                        翻译确认
+                    </h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body" id="confirmModalBody">
+                    <!-- 确认信息将通过JavaScript动态插入 -->
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">
+                        取消
+                    </button>
+                    <button type="button" class="btn btn-primary" id="confirmTranslateBtn">
+                        确认翻译
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+<script>
+  function handleFolderSelection(event) {
+    var selectedFiles = event.target.files;
+    var folderPath = selectedFiles[0].webkitRelativePath.split('/')[0];
+    console.log(folderPath);
+  }
+</script>
+
+    <script src="{{ url_for('static', filename='js/bootstrap.bundle.min.js') }}"></script>
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            const form = document.getElementById('translationForm');
+            const translateBtn = document.getElementById('translateBtn');
+            const progressSection = document.getElementById('progressSection');
+            const resultSection = document.getElementById('resultSection');
+            const confirmModal = new bootstrap.Modal(document.getElementById('confirmModal'));
+            
+            // 表单提交处理
+            form.addEventListener('submit', async function(e) {
+                e.preventDefault();
+                
+                const outputPath = document.getElementById('outputPath').value.trim();
+                const encoding = document.querySelector('input[name="encoding"]:checked').value;
+                
+                if (!outputPath) {
+                    showAlert('请填写输出路径', 'warning');
+                    return;
+                }
+                
+                await performTranslation('', outputPath, encoding);
+            });
+            
+            // 执行翻译
+            async function performTranslation(inputPath, outputPath, encoding) {
+                try {
+                    // 显示进度
+                    showProgress(true);
+                    translateBtn.disabled = true;
+                    
+                    const response = await fetch('/api/data_translation', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({
+                            output_path: outputPath,
+                            encoding: encoding
+                        })
+                    });
+                    
+                    const result = await response.json();
+                    
+                    if (result.success) {
+                        showResult(result, 'success');
+                    } else {
+                        showResult(result, 'error');
+                    }
+                    
+                } catch (error) {
+                    console.error('翻译过程中发生错误:', error);
+                    showResult({
+                        message: '翻译过程中发生网络错误，请检查网络连接后重试'
+                    }, 'error');
+                } finally {
+                    showProgress(false);
+                    translateBtn.disabled = false;
+                }
+            }
+            
+            // 显示/隐藏进度
+            function showProgress(show) {
+                progressSection.style.display = show ? 'block' : 'none';
+                if (show) {
+                    resultSection.innerHTML = '';
+                }
+            }
+            
+            // 显示结果
+            function showResult(result, type) {
+                const alertClass = type === 'success' ? 'alert-success' : 'alert-danger';
+                const icon = type === 'success' ? 'fas fa-check-circle' : 'fas fa-exclamation-circle';
+                
+                let resultHtml = `
+                    <div class="alert ${alertClass} d-flex align-items-center" role="alert">
+                        <i class="${icon} me-2"></i>
+                        <div>
+                            <strong>${result.message}</strong>
+                `;
+                
+                if (type === 'success' && result.translated_count !== undefined) {
+                    resultHtml += `
+                        <div class="mt-2">
+                            <small class="text-muted">
+                                <i class="fas fa-info-circle me-1"></i>
+                                翻译统计：${result.translated_count} 个主数据集，${result.supp_count || 0} 个SUPP数据集
+                            </small>
+                        </div>
+                    `;
+                }
+                
+                resultHtml += `
+                        </div>
+                    </div>
+                `;
+                
+                resultSection.innerHTML = resultHtml;
+            }
+            
+            // 显示警告信息
+            function showAlert(message, type = 'info') {
+                const alertClass = `alert-${type}`;
+                const icon = type === 'warning' ? 'fas fa-exclamation-triangle' : 'fas fa-info-circle';
+                
+                const alertHtml = `
+                    <div class="alert ${alertClass} alert-dismissible fade show" role="alert">
+                        <i class="${icon} me-2"></i>
+                        ${message}
+                        <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+                    </div>
+                `;
+                
+                resultSection.innerHTML = alertHtml;
+            }
+            
+            // 浏览按钮功能
+            document.getElementById('browseOutputBtn').addEventListener('click', function() {
+                selectDirectory('outputPath', '输出');
+            });
+            
+            // 文件夹选择函数
+            function selectDirectory(inputId, type) {
+                // 优先使用现代 File System Access API
+                if ('showDirectoryPicker' in window) {
+                    // 使用现代 API 提供原生文件夹选择体验
+                    window.showDirectoryPicker({
+                        mode: 'read'
+                    }).then(directoryHandle => {
+                        // 获取文件夹名称
+                        const folderName = directoryHandle.name;
+                        
+                        // 由于浏览器安全限制，无法获取完整路径
+                        // 提示用户输入完整路径，并提供文件夹名称作为参考
+                        const userPath = prompt(
+                            `已选择文件夹: "${folderName}"\n\n` +
+                            `由于浏览器安全限制，请输入该文件夹的完整绝对路径：\n` +
+                            `例如: D:\\data\\${type.toLowerCase()} 或 C:\\Users\\用户名\\Documents\\${folderName}`,
+                            `D:\\path\\to\\${folderName}`
+                        );
+                        
+                        if (userPath && userPath.trim()) {
+                            const finalPath = userPath.trim();
+                            document.getElementById(inputId).value = finalPath;
+                            showAlert(`已设置${type}文件夹路径: ${finalPath}`, 'success');
+                        } else {
+                            // 用户取消或未输入，使用文件夹名称作为默认值
+                            document.getElementById(inputId).value = folderName;
+                            showAlert(`已设置为文件夹名称: ${folderName}，请手动修改为完整的绝对路径`, 'info');
+                        }
+                    }).catch(error => {
+                        if (error.name !== 'AbortError') {
+                            console.error('文件夹选择失败:', error);
+                            showAlert('文件夹选择失败，请手动输入完整路径', 'error');
+                        }
+                    });
+                } else {
+                    // 降级到传统文件夹选择方式
+                    const input = document.createElement('input');
+                    input.type = 'file';
+                    input.webkitdirectory = true;
+                    input.multiple = true;
+                    
+                    input.addEventListener('change', (event) => {
+                        const files = event.target.files;
+                        if (files.length > 0) {
+                            const firstFile = files[0];
+                            let folderPath = '';
+                            
+                            // 尝试从文件路径中提取文件夹路径
+                            if (firstFile.webkitRelativePath) {
+                                // 方法1: 尝试使用文件的完整路径（某些浏览器支持）
+                                if (firstFile.path) {
+                                    const fullPath = firstFile.path;
+                                    // 提取目录路径，移除文件名
+                                    const lastSeparator = Math.max(fullPath.lastIndexOf('/'), fullPath.lastIndexOf('\\'));
+                                    if (lastSeparator > 0) {
+                                        folderPath = fullPath.substring(0, lastSeparator);
+                                    }
+                                }
+                                
+                                // 方法2: 如果没有完整路径，尝试构建相对路径
+                                if (!folderPath) {
+                                    const pathParts = firstFile.webkitRelativePath.split('/');
+                                    if (pathParts.length > 1) {
+                                        // 移除文件名，保留目录结构
+                                        pathParts.pop();
+                                        folderPath = pathParts.join('/');
+                                    } else {
+                                        folderPath = pathParts[0]; // 只有文件夹名
+                                    }
+                                }
+                                
+                                if (folderPath) {
+                                    document.getElementById(inputId).value = folderPath;
+                                    
+                                    // 检查是否为完整路径
+                                    if (folderPath.includes(':') || folderPath.startsWith('/')) {
+                                        showAlert(`已设置${type}文件夹路径: ${folderPath}`, 'success');
+                                    } else {
+                                        showAlert(`已选择${type}文件夹: ${folderPath}，如需要请手动调整为完整的绝对路径`, 'info');
+                                    }
+                                } else {
+                                    showAlert('无法获取文件夹路径，请手动输入完整路径', 'warning');
+                                }
+                            } else {
+                                showAlert('无法获取文件夹信息，请手动输入完整路径', 'error');
+                            }
+                        }
+                    });
+                    
+                    input.click();
+                }
+            }
+        });
+    </script>
+</body>
+</html>
